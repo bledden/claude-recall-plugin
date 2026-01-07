@@ -2,25 +2,23 @@
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that helps you recover conversation context when Claude loses track, with interactive browsing and observability logging.
 
+> **📋 Marketplace Status:** This plugin has been submitted to the official Claude Code plugins repository and is awaiting approval.
+>
+> **PR:** [anthropics/claude-code#16680](https://github.com/anthropics/claude-code/pull/16680)
+
+---
+
 ## Installation
 
-### From GitHub
+### Option 1: Direct Loading (Recommended Until Marketplace Approval)
+
+Clone the repository and load the plugin directly:
 
 ```bash
-claude plugins install https://github.com/bledden/claude-recall-plugin
-```
+# Clone the plugin
+git clone https://github.com/bledden/claude-recall-plugin.git
 
-### From Local Directory
-
-```bash
-claude plugins install /path/to/claude-recall-plugin
-```
-
-### Troubleshooting: Plugin Not Appearing
-
-If `/recall` doesn't appear after installation, the plugin may not have registered correctly with Claude Code's plugin system. Use the `--plugin-dir` flag to load it directly:
-
-```bash
+# Run Claude Code with the plugin loaded
 claude --plugin-dir /path/to/claude-recall-plugin
 ```
 
@@ -31,6 +29,14 @@ alias claude='claude --plugin-dir /path/to/claude-recall-plugin'
 ```
 
 Then restart your terminal or run `source ~/.zshrc`.
+
+### Option 2: Plugin Install Command
+
+```bash
+claude plugins install https://github.com/bledden/claude-recall-plugin
+```
+
+> **Note:** If `/recall` doesn't appear after using the install command, use **Option 1** instead. The `--plugin-dir` flag is the most reliable method until the plugin is officially in the marketplace.
 
 ## Quick Start
 
