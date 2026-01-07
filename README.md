@@ -16,6 +16,22 @@ claude plugins install https://github.com/bledden/claude-recall-plugin
 claude plugins install /path/to/claude-recall-plugin
 ```
 
+### Troubleshooting: Plugin Not Appearing
+
+If `/recall` doesn't appear after installation, the plugin may not have registered correctly with Claude Code's plugin system. Use the `--plugin-dir` flag to load it directly:
+
+```bash
+claude --plugin-dir /path/to/claude-recall-plugin
+```
+
+To make this permanent, add an alias to your shell profile (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+alias claude='claude --plugin-dir /path/to/claude-recall-plugin'
+```
+
+Then restart your terminal or run `source ~/.zshrc`.
+
 ## Quick Start
 
 When Claude seems to have lost context, simply run:
