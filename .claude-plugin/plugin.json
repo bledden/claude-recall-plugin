@@ -1,0 +1,9 @@
+{
+  "name": "claude-recall-plugin",
+  "description": "Recover conversation context when Claude loses track, with interactive browsing and observability logging",
+  "version": "1.0.0",
+  "author": {
+    "name": "bledden"
+  },
+  "repository": "https://github.com/bledden/claude-recall-plugin"
+}
