@@ -10,87 +10,32 @@ Usage:
     python3 show_index.py --around "2:30pm"  # Show exchanges around a time
     python3 show_index.py --search "keyword" # Search for exchanges containing keyword
 
-Output is formatted markdown for display in the /recall command.
+Improvements:
+- Uses shared utils module
+- Full-content search (not just preview)
+- Groups exchanges by date in multi-day sessions
+- Shows date range info
 """
 
 import argparse
-import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 
+# Add scripts directory to path for utils import
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Configuration
-PAGE_SIZE = 20  # Exchanges per page
-
-
-def load_index() -> Optional[Dict]:
-    """Load the conversation index."""
-    index_file = Path.home() / '.claude' / 'context-recall' / 'index.json'
-
-    if not index_file.exists():
-        return None
-
-    try:
-        with open(index_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def format_timestamp(iso_timestamp: str) -> str:
-    """Format ISO timestamp as human-readable time."""
-    if not iso_timestamp:
-        return "??:??"
-
-    try:
-        dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
-        # Convert to local time
-        local_dt = dt.astimezone()
-        return local_dt.strftime("%-I:%M %p").lower()
-    except Exception:
-        return "??:??"
-
-
-def format_date(iso_timestamp: str) -> str:
-    """Format ISO timestamp as human-readable date."""
-    if not iso_timestamp:
-        return "Unknown date"
-
-    try:
-        dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
-        local_dt = dt.astimezone()
-        return local_dt.strftime("%b %d, %Y at %-I:%M %p")
-    except Exception:
-        return "Unknown date"
-
-
-def parse_time_query(time_str: str) -> Optional[datetime]:
-    """Parse a time query like '2:30pm', '14:30', 'around 3pm'."""
-    time_str = time_str.lower().strip()
-    time_str = re.sub(r'^around\s+', '', time_str)
-
-    # Try various formats
-    formats = [
-        "%I:%M%p",   # 2:30pm
-        "%I:%M %p", # 2:30 pm
-        "%I%p",      # 2pm
-        "%I %p",     # 2 pm
-        "%H:%M",     # 14:30
-    ]
-
-    for fmt in formats:
-        try:
-            parsed = datetime.strptime(time_str, fmt)
-            # Use today's date
-            today = datetime.now()
-            return parsed.replace(year=today.year, month=today.month, day=today.day)
-        except ValueError:
-            continue
-
-    return None
+from utils import (
+    load_index,
+    format_timestamp,
+    format_date,
+    format_short_date,
+    parse_time_query,
+    get_date_from_timestamp,
+    search_in_text,
+    PAGE_SIZE,
+)
 
 
 def find_page_for_time(exchanges: List[Dict], target_time: datetime) -> int:
@@ -98,14 +43,12 @@ def find_page_for_time(exchanges: List[Dict], target_time: datetime) -> int:
     if not exchanges:
         return 1
 
-    # Find the exchange closest to target_time
     best_idx = 0
     best_diff = float('inf')
 
     for i, ex in enumerate(exchanges):
         try:
             ex_time = datetime.fromisoformat(ex['timestamp'].replace('Z', '+00:00'))
-            # Compare only time portion
             ex_minutes = ex_time.hour * 60 + ex_time.minute
             target_minutes = target_time.hour * 60 + target_time.minute
             diff = abs(ex_minutes - target_minutes)
@@ -115,18 +58,49 @@ def find_page_for_time(exchanges: List[Dict], target_time: datetime) -> int:
         except Exception:
             continue
 
-    # Calculate page (1-indexed, showing most recent first)
     total = len(exchanges)
-    # Position from end (most recent = 0)
     pos_from_end = total - 1 - best_idx
     page = (pos_from_end // PAGE_SIZE) + 1
     return page
 
 
 def search_exchanges(exchanges: List[Dict], keyword: str) -> List[Dict]:
-    """Search exchanges for keyword in preview."""
-    keyword_lower = keyword.lower()
-    return [ex for ex in exchanges if keyword_lower in ex.get('preview', '').lower()]
+    """Search exchanges for keyword in preview AND full content."""
+    results = []
+    for ex in exchanges:
+        # Search preview
+        if search_in_text(ex.get('preview', ''), keyword):
+            results.append(ex)
+            continue
+        # Search full content if available
+        if search_in_text(ex.get('user_text', ''), keyword):
+            results.append(ex)
+            continue
+        if search_in_text(ex.get('assistant_text', ''), keyword):
+            results.append(ex)
+    return results
+
+
+def get_session_date_range(exchanges: List[Dict]) -> str:
+    """Get human-readable date range for the session."""
+    if not exchanges:
+        return ""
+
+    dates = set()
+    for ex in exchanges:
+        date = get_date_from_timestamp(ex.get('timestamp', ''))
+        if date:
+            dates.add(date)
+
+    if len(dates) == 0:
+        return ""
+    elif len(dates) == 1:
+        return format_short_date(list(dates)[0] + 'T00:00:00Z')
+    else:
+        sorted_dates = sorted(dates)
+        start = format_short_date(sorted_dates[0] + 'T00:00:00Z')
+        end = format_short_date(sorted_dates[-1] + 'T00:00:00Z')
+        return f"{start} - {end}"
 
 
 def format_page(
@@ -141,26 +115,37 @@ def format_page(
     if not exchanges:
         return "*No exchanges found in this session.*"
 
-    # Calculate slice for this page (most recent first)
-    # Page 1 = most recent PAGE_SIZE exchanges
     start_from_end = (page - 1) * PAGE_SIZE
     end_from_end = start_from_end + PAGE_SIZE
 
-    # Get slice in reverse order (most recent first)
     page_exchanges = list(reversed(exchanges))
     page_slice = page_exchanges[start_from_end:end_from_end]
 
     if not page_slice:
         return f"*Page {page} is empty. Total pages: {total_pages}*"
 
-    # Build output
+    # Get date range info
+    date_range = get_session_date_range(exchanges)
+    date_info = f" ({date_range})" if date_range else ""
+
     lines = []
-    lines.append(f"**Session started:** {format_date(session_start)} ({total_exchanges} exchanges)")
+    lines.append(f"**Session started:** {format_date(session_start)}{date_info}")
+    lines.append(f"**Total exchanges:** {total_exchanges}")
     lines.append("")
     lines.append(f"**Showing page {page} of {total_pages}** (most recent first):")
     lines.append("")
 
+    # Group by date if multi-day session
+    current_date = None
     for ex in page_slice:
+        ex_date = get_date_from_timestamp(ex.get('timestamp', ''))
+
+        # Show date header if date changed
+        if ex_date != current_date:
+            current_date = ex_date
+            if ex_date:
+                lines.append(f"\n**{format_short_date(ex_date + 'T00:00:00Z')}:**")
+
         idx = ex.get('idx', '?')
         time = format_timestamp(ex.get('timestamp', ''))
         preview = ex.get('preview', '(no preview)')
@@ -174,7 +159,7 @@ def format_page(
         lines.append(f"- Show newer: page {page - 1}")
     if page < total_pages:
         lines.append(f"- Show older: page {page + 1}")
-    lines.append("- Jump to time: e.g., \"around 2pm\"")
+    lines.append("- Jump to time: e.g., \"around 2pm\" or \"around jan 5 2pm\"")
     lines.append("- Search: e.g., \"search authentication\"")
 
     return "\n".join(lines)
@@ -183,14 +168,21 @@ def format_page(
 def format_search_results(results: List[Dict], keyword: str, total_exchanges: int) -> str:
     """Format search results as markdown."""
     if not results:
-        return f"*No exchanges found matching \"{keyword}\"*"
+        return f"*No exchanges found matching \"{keyword}\"*\n*Search looks in both user prompts AND assistant responses.*"
 
     lines = []
     lines.append(f"**Search results for \"{keyword}\":** ({len(results)} matches)")
     lines.append("")
 
-    # Show up to 20 results
+    # Group by date
+    current_date = None
     for ex in results[:20]:
+        ex_date = get_date_from_timestamp(ex.get('timestamp', ''))
+        if ex_date != current_date:
+            current_date = ex_date
+            if ex_date:
+                lines.append(f"\n**{format_short_date(ex_date + 'T00:00:00Z')}:**")
+
         idx = ex.get('idx', '?')
         time = format_timestamp(ex.get('timestamp', ''))
         preview = ex.get('preview', '(no preview)')

@@ -37,19 +37,22 @@ This will:
 Running `/recall` shows your conversation index with timestamps:
 
 ```
-Session started: Jan 5, 2026 at 9:00 AM (19 exchanges)
+Session started: Jan 5, 2026 at 9:00 AM (Jan 5 - Jan 7)
+Total exchanges: 117
 
-Showing page 1 of 1 (most recent first):
+Showing page 1 of 6 (most recent first):
 
-#19 [11:24 pm] "like 10:15pm-ish?"
-#18 [11:24 pm] "# Context Recall The user wants to recover..."
-#17 [8:42 pm] "skip"
-#16 [8:36 pm] "<ide_opened_file>The user opened the file..."
+**Jan 7:**
+#117 [5:13 pm] "root@dendritic-distillation:~/dendritic# ls..."
+#116 [2:49 pm] "Yes, give me the command to kick that off"
+
+**Jan 6:**
+#115 [1:33 pm] "It looks like the experiment is complete..."
 ...
 
 Navigation:
 - Show older: page 2
-- Jump to time: e.g., "around 2pm"
+- Jump to time: e.g., "around 2pm" or "around jan 5 2pm"
 - Search: e.g., "search authentication"
 ```
 
@@ -58,25 +61,38 @@ Then you'll be asked what to recall:
 | Option | Description |
 |--------|-------------|
 | **Recent (last 5)** | Quick recall of most recent exchanges |
-| **Search by keyword** | Find exchanges containing specific text |
-| **Jump to time** | Find exchanges around a specific time (e.g., "2pm") |
+| **Search by keyword** | Find exchanges in full content (user + assistant) |
+| **Jump to time** | Find exchanges around a specific time |
 
 ### Quick Commands (skip the menu)
 
 ```
-/recall last5           # Last 5 exchanges
-/recall last10          # Last 10 exchanges
-/recall around 2pm      # Exchanges around 2pm
-/recall around 14:30    # Exchanges around 2:30pm
-/recall search auth     # Search for "auth" in exchanges
-/recall search "PAI"    # Search for specific term
+/recall last5              # Last 5 exchanges
+/recall last10             # Last 10 exchanges
+/recall around 2pm         # Exchanges around 2pm (any day)
+/recall around "jan 5 2pm" # Exchanges around 2pm on Jan 5
+/recall search auth        # Search full content for "auth"
+/recall search "PAI dim"   # Search for phrase
 ```
+
+## Features
+
+### Full-Content Search
+Search looks in both user prompts AND assistant responses, not just previews. Find that thing Claude mentioned even if you don't remember exactly what you asked.
+
+### Multi-Day Session Support
+For sessions spanning multiple days, the index groups exchanges by date and time searches can specify a date:
+- `around 2pm` - finds closest 2pm across all days
+- `around "jan 5 2pm"` - finds 2pm specifically on Jan 5
+
+### Incremental Updates
+The hook only processes new messages since the last update, making it efficient even for very long sessions.
 
 ## How It Works
 
-1. **Hook runs on every prompt** - Builds a timestamped index of all exchanges
+1. **Hook runs on every prompt** - Incrementally updates the index
 2. **Index stored locally** - At `~/.claude/context-recall/index.json`
-3. **On `/recall`** - Shows index, lets you choose, fetches full content
+3. **Full content cached** - Enables searching without re-parsing transcript
 4. **Observability** - Every recall is logged for analysis
 
 ## Observability
@@ -108,25 +124,13 @@ Located at `~/.claude/context-recall/`:
 
 | File | Purpose |
 |------|---------|
-| `index.json` | Current session's timestamped index |
-| `current.json` | Last 5 exchanges (quick access) |
-| `{session_id}_index.json` | Per-session backup (persists after session ends) |
+| `index.json` | Current session's timestamped index with full content |
 
 ### Session Behavior
 
-- **Current session**: `index.json` updates on every prompt
-- **Past sessions**: Saved as `{session_id}_index.json` and preserved
-- **No size limit**: Index grows with conversation (~160KB per 1,000 exchanges)
-
-### Accessing Past Sessions
-
-```bash
-# List all session indexes
-ls ~/.claude/context-recall/*_index.json
-
-# To recall from a past session, copy its index:
-cp ~/.claude/context-recall/{session_id}_index.json ~/.claude/context-recall/index.json
-```
+- **Current session**: `index.json` updates incrementally on every prompt
+- **New session**: Previous index is overwritten
+- **No size limit**: Index grows with conversation
 
 ## Plugin Structure
 
@@ -138,13 +142,14 @@ claude-recall-plugin/
 │   └── recall.md                # The /recall command
 ├── hooks/
 │   ├── hooks.json               # Hook configuration
-│   └── save_context_snapshot.py # Builds index + logs events
+│   └── save_context_snapshot.py # Builds index incrementally
 ├── scripts/
+│   ├── utils.py                 # Shared utilities
 │   ├── show_index.py            # Paginated index display
 │   ├── fetch_exchanges.py       # Fetch exchanges by query
 │   └── extract_context.py       # Legacy quick recall
 └── tests/
-    └── *.py                     # Unit and integration tests
+    └── *.py                     # Unit tests
 ```
 
 ## Running Tests

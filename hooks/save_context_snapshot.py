@@ -2,14 +2,15 @@
 """Save context snapshots and build conversation index for the /recall command.
 
 This hook runs on every UserPromptSubmit event. It:
-1. Reads the transcript from transcript_path (available in hook input)
-2. Builds a full timestamped index of all exchanges (for browsing)
-3. Extracts the last N exchanges with full content (for quick recall)
-4. Saves both to ~/.claude/context-recall/
-5. Logs /recall events for observability
+1. Loads existing index (if any) for the current session
+2. Incrementally adds only NEW exchanges (avoids re-parsing entire transcript)
+3. Falls back to full rebuild if session changed or index corrupted
+4. Logs /recall events for observability
 
-This allows the /recall command to show an index for selection
-and fetch full content on demand.
+Optimizations:
+- Incremental updates: Only parses new messages since last update
+- Single output file: Just index.json (no redundant files)
+- Stores byte offset for efficient incremental reads
 """
 
 import json
@@ -19,61 +20,59 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
+# Add scripts directory to path for utils import
+sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-# Configuration
-PREVIEW_LENGTH = 80  # Characters for index preview
-MAX_RECENT_EXCHANGES = 5  # Full content exchanges to keep
-MAX_CHARS_PER_MESSAGE = 1000  # Truncation limit for full content
-MAX_TOTAL_CHARS = 8000  # Total size limit for full content
-
-
-def extract_text_content(message: Dict[str, Any]) -> str:
-    """Extract text content from a message object."""
-    content = message.get('content', [])
-    if isinstance(content, str):
-        return content
-
-    text_parts = []
-    for item in content:
-        if isinstance(item, dict) and item.get('type') == 'text':
-            text_parts.append(item.get('text', ''))
-        elif isinstance(item, str):
-            text_parts.append(item)
-
-    return '\n'.join(text_parts)
+from utils import (
+    extract_text_content,
+    make_preview,
+    truncate_text,
+    INDEX_DIR,
+    INDEX_FILE,
+    LOG_FILE,
+    PREVIEW_LENGTH,
+    MAX_CHARS_PER_MESSAGE,
+)
 
 
-def make_preview(text: str, max_length: int = PREVIEW_LENGTH) -> str:
-    """Create a short preview of text for the index."""
-    # Remove newlines and extra whitespace
-    text = ' '.join(text.split())
-    if len(text) <= max_length:
-        return text
-    return text[:max_length - 3] + '...'
+def get_transcript_size(transcript_path: str) -> int:
+    """Get the current size of the transcript file."""
+    try:
+        return os.path.getsize(transcript_path)
+    except Exception:
+        return 0
 
 
-def parse_transcript_with_timestamps(transcript_path: str) -> List[Dict[str, Any]]:
-    """Parse transcript file and extract messages with timestamps.
+def parse_transcript_from_offset(
+    transcript_path: str,
+    byte_offset: int = 0
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Parse transcript file starting from byte offset.
 
-    Returns list of dicts with keys: role, text, timestamp
+    Returns:
+        Tuple of (messages list, new byte offset)
     """
     messages = []
+    new_offset = byte_offset
 
     if not transcript_path or not os.path.exists(transcript_path):
-        return messages
+        return messages, new_offset
 
     try:
         with open(transcript_path, 'r', encoding='utf-8') as f:
+            # Seek to offset if provided
+            if byte_offset > 0:
+                f.seek(byte_offset)
+
             for line in f:
-                line = line.strip()
-                if not line:
+                line_stripped = line.strip()
+                if not line_stripped:
                     continue
+
                 try:
-                    entry = json.loads(line)
-                    # Role can be at top level (type field) or in message
+                    entry = json.loads(line_stripped)
                     role = entry.get('type', '') or entry.get('role', '')
                     if role not in ('user', 'assistant'):
-                        # Try getting from message object
                         message_obj = entry.get('message', {})
                         role = message_obj.get('role', '')
 
@@ -90,43 +89,40 @@ def parse_transcript_with_timestamps(transcript_path: str) -> List[Dict[str, Any
                             })
                 except json.JSONDecodeError:
                     continue
+
+            # Get final position
+            new_offset = f.tell()
+
     except Exception:
         pass
 
-    return messages
+    return messages, new_offset
 
 
-def truncate_text(text: str, max_chars: int = MAX_CHARS_PER_MESSAGE) -> str:
-    """Truncate text to max_chars, adding indicator if truncated."""
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n\n[...truncated...]"
+def build_new_exchanges(
+    messages: List[Dict[str, Any]],
+    start_idx: int = 1
+) -> List[Dict]:
+    """Build exchanges from messages, starting at given index.
 
-
-def build_exchange_index(messages: List[Dict[str, Any]]) -> Tuple[List[Dict], List[Dict]]:
-    """Build full index of exchanges and extract recent ones with full content.
-
-    Returns:
-        Tuple of (full_index, recent_exchanges)
-        - full_index: List of {idx, preview, timestamp} for all exchanges
-        - recent_exchanges: List of {user, assistant, timestamp} for last N exchanges
+    Returns list of dicts with: idx, preview, timestamp, user_text, assistant_text
     """
-    # First pass: identify all user/assistant pairs
-    all_exchanges = []
+    exchanges = []
     i = 0
-    exchange_idx = 1
+    exchange_idx = start_idx
 
     while i < len(messages):
         if messages[i]['role'] == 'user':
             user_msg = messages[i]
-            # Look for following assistant message
             if i + 1 < len(messages) and messages[i + 1]['role'] == 'assistant':
                 assistant_msg = messages[i + 1]
-                all_exchanges.append({
+                exchanges.append({
                     'idx': exchange_idx,
-                    'user_text': user_msg['text'],
-                    'assistant_text': assistant_msg['text'],
-                    'timestamp': user_msg.get('timestamp', '')
+                    'preview': make_preview(user_msg['text']),
+                    'timestamp': user_msg.get('timestamp', ''),
+                    # Store full text for search (truncated for size)
+                    'user_text': truncate_text(user_msg['text'], MAX_CHARS_PER_MESSAGE),
+                    'assistant_text': truncate_text(assistant_msg['text'], MAX_CHARS_PER_MESSAGE),
                 })
                 exchange_idx += 1
                 i += 2
@@ -135,95 +131,35 @@ def build_exchange_index(messages: List[Dict[str, Any]]) -> Tuple[List[Dict], Li
         else:
             i += 1
 
-    # Build index with previews (user message only - best memory trigger)
-    full_index = []
-    for ex in all_exchanges:
-        full_index.append({
-            'idx': ex['idx'],
-            'preview': make_preview(ex['user_text']),
-            'timestamp': ex['timestamp']
-        })
-
-    # Extract recent exchanges with full content (with truncation)
-    recent_exchanges = []
-    total_chars = 0
-
-    for ex in reversed(all_exchanges[-MAX_RECENT_EXCHANGES:]):
-        user_text = truncate_text(ex['user_text'], MAX_CHARS_PER_MESSAGE)
-        assistant_text = truncate_text(ex['assistant_text'], MAX_CHARS_PER_MESSAGE)
-
-        exchange_chars = len(user_text) + len(assistant_text)
-        if total_chars + exchange_chars > MAX_TOTAL_CHARS:
-            break
-
-        recent_exchanges.insert(0, {
-            'idx': ex['idx'],
-            'user': user_text,
-            'assistant': assistant_text,
-            'timestamp': ex['timestamp']
-        })
-        total_chars += exchange_chars
-
-    return full_index, recent_exchanges
+    return exchanges
 
 
-def save_index_and_snapshot(
-    session_id: str,
-    transcript_path: str,
-    full_index: List[Dict],
-    recent_exchanges: List[Dict]
-) -> None:
-    """Save both the full index and recent exchanges snapshot."""
-    snapshot_dir = Path.home() / '.claude' / 'context-recall'
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
+def load_existing_index(session_id: str) -> Optional[Dict]:
+    """Load existing index if it matches current session."""
+    if not INDEX_FILE.exists():
+        return None
 
-    now = datetime.now(timezone.utc).isoformat()
-
-    # Determine session start from first exchange
-    session_start = full_index[0]['timestamp'] if full_index else now
-
-    # Full index for browsing
-    index_data = {
-        'session_id': session_id,
-        'session_start': session_start,
-        'updated_at': now,
-        'total_exchanges': len(full_index),
-        'transcript_path': transcript_path,
-        'exchanges': full_index
-    }
-
-    # Recent exchanges for quick recall (backward compatible)
-    snapshot_data = {
-        'session_id': session_id,
-        'timestamp': now,
-        'message_count': len(full_index) * 2,  # Approximate message count
-        'exchanges': [
-            {'user': ex['user'], 'assistant': ex['assistant']}
-            for ex in recent_exchanges
-        ]
-    }
-
-    # Save index
     try:
-        index_file = snapshot_dir / 'index.json'
-        with open(index_file, 'w', encoding='utf-8') as f:
-            json.dump(index_data, f, indent=2)
+        with open(INDEX_FILE, 'r', encoding='utf-8') as f:
+            index = json.load(f)
+
+        # Only use if same session
+        if index.get('session_id') == session_id:
+            return index
+
     except Exception:
         pass
 
-    # Save session-specific index
-    try:
-        session_index_file = snapshot_dir / f'{session_id}_index.json'
-        with open(session_index_file, 'w', encoding='utf-8') as f:
-            json.dump(index_data, f, indent=2)
-    except Exception:
-        pass
+    return None
 
-    # Save current snapshot (backward compatible)
+
+def save_index(index_data: Dict) -> None:
+    """Save the index to disk."""
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
+
     try:
-        current_file = snapshot_dir / 'current.json'
-        with open(current_file, 'w', encoding='utf-8') as f:
-            json.dump(snapshot_data, f, indent=2)
+        with open(INDEX_FILE, 'w', encoding='utf-8') as f:
+            json.dump(index_data, f, indent=2)
     except Exception:
         pass
 
@@ -235,12 +171,10 @@ def log_recall_event(session_id: str, exchange_count: int) -> None:
 
     print(f"[context-recall] Context recall triggered at exchange #{exchange_count}", file=sys.stderr)
 
-    log_dir = Path.home() / '.claude'
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / 'recall-events.log'
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        with open(log_file, 'a', encoding='utf-8') as f:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
             f.write(log_entry)
     except Exception:
         pass
@@ -255,20 +189,66 @@ def main():
         transcript_path = input_data.get('transcript_path', '')
         user_prompt = input_data.get('user_prompt', '')
 
-        # Parse transcript with timestamps
-        messages = parse_transcript_with_timestamps(transcript_path)
+        now = datetime.now(timezone.utc).isoformat()
 
-        # Build index and extract recent exchanges
-        full_index, recent_exchanges = build_exchange_index(messages)
+        # Try to load existing index for incremental update
+        existing_index = load_existing_index(session_id)
 
-        # Save everything
-        save_index_and_snapshot(session_id, transcript_path, full_index, recent_exchanges)
+        if existing_index:
+            # Incremental update
+            last_offset = existing_index.get('_byte_offset', 0)
+            current_size = get_transcript_size(transcript_path)
+
+            # Only parse if transcript has grown
+            if current_size > last_offset:
+                new_messages, new_offset = parse_transcript_from_offset(
+                    transcript_path, last_offset
+                )
+
+                if new_messages:
+                    # Build new exchanges starting after existing ones
+                    start_idx = existing_index.get('total_exchanges', 0) + 1
+                    new_exchanges = build_new_exchanges(new_messages, start_idx)
+
+                    # Append to existing exchanges
+                    existing_index['exchanges'].extend(new_exchanges)
+                    existing_index['total_exchanges'] = len(existing_index['exchanges'])
+                    existing_index['updated_at'] = now
+                    existing_index['_byte_offset'] = new_offset
+
+                    save_index(existing_index)
+                    index_data = existing_index
+                else:
+                    # No new complete exchanges yet
+                    existing_index['_byte_offset'] = new_offset
+                    save_index(existing_index)
+                    index_data = existing_index
+            else:
+                index_data = existing_index
+        else:
+            # Full rebuild (new session or no existing index)
+            messages, byte_offset = parse_transcript_from_offset(transcript_path, 0)
+            exchanges = build_new_exchanges(messages, 1)
+
+            session_start = exchanges[0]['timestamp'] if exchanges else now
+
+            index_data = {
+                'session_id': session_id,
+                'session_start': session_start,
+                'updated_at': now,
+                'total_exchanges': len(exchanges),
+                'transcript_path': transcript_path,
+                'exchanges': exchanges,
+                '_byte_offset': byte_offset,
+            }
+
+            save_index(index_data)
 
         # Check if this is a /recall command
         if user_prompt.strip().lower().startswith('/recall'):
-            log_recall_event(session_id, len(full_index))
+            log_recall_event(session_id, index_data.get('total_exchanges', 0))
             result = {
-                "systemMessage": f"[Observability] Context recall logged at exchange #{len(full_index)}"
+                "systemMessage": f"[Observability] Context recall logged at exchange #{index_data.get('total_exchanges', 0)}"
             }
         else:
             result = {}
