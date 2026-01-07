@@ -115,13 +115,15 @@ def parse_date_time_query(time_str: str, reference_dates: List[str] = None) -> O
         (r'(\d{1,2})/(\d{1,2})', '%m/%d'),   # 1/5
     ]
 
+    current_year = datetime.now().year
     for pattern, date_fmt in date_patterns:
         match = re.search(pattern, time_str)
         if match:
             try:
                 date_str = match.group(0)
-                parsed_date = datetime.strptime(date_str, date_fmt)
-                target_date = parsed_date.replace(year=datetime.now().year).date()
+                # Add year to avoid Python 3.15 deprecation warning
+                parsed_date = datetime.strptime(f"{date_str} {current_year}", f"{date_fmt} %Y")
+                target_date = parsed_date.date()
                 time_str = time_str.replace(date_str, '').strip()
                 break
             except ValueError:

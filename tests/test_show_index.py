@@ -14,14 +14,16 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 from show_index import (
+    find_page_for_time,
+    search_exchanges,
+    format_page,
+)
+from utils import (
     load_index,
     format_timestamp,
     format_date,
     parse_time_query,
-    find_page_for_time,
-    search_exchanges,
-    format_page,
-    PAGE_SIZE
+    PAGE_SIZE,
 )
 
 
@@ -37,12 +39,12 @@ class TestFormatTimestamp(unittest.TestCase):
     def test_empty_timestamp(self):
         """Test with empty timestamp."""
         result = format_timestamp("")
-        self.assertEqual(result, "??:??")
+        self.assertEqual(result, "")
 
     def test_invalid_timestamp(self):
         """Test with invalid timestamp."""
         result = format_timestamp("not-a-timestamp")
-        self.assertEqual(result, "??:??")
+        self.assertEqual(result, "")
 
 
 class TestParseTimeQuery(unittest.TestCase):
@@ -152,7 +154,7 @@ class TestFormatPage(unittest.TestCase):
         result = format_page(exchanges, 1, 2, '2025-01-05T09:00:00Z')
 
         self.assertIn('Session started', result)
-        self.assertIn('2 exchanges', result)
+        self.assertIn('Total exchanges', result)
         self.assertIn('First exchange', result)
 
     def test_format_empty_page(self):
@@ -188,6 +190,8 @@ class TestLoadIndex(unittest.TestCase):
 
     def test_load_valid_index(self):
         """Test loading a valid index file."""
+        import utils
+
         index_data = {
             'session_id': 'test-123',
             'total_exchanges': 10,
@@ -200,20 +204,28 @@ class TestLoadIndex(unittest.TestCase):
         with open(index_file, 'w') as f:
             json.dump(index_data, f)
 
-        with patch.object(Path, 'home', return_value=Path(self.temp_dir)):
+        # Patch the INDEX_FILE constant directly
+        original_index_file = utils.INDEX_FILE
+        utils.INDEX_FILE = index_file
+        try:
             result = load_index()
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result['session_id'], 'test-123')
+            self.assertIsNotNone(result)
+            self.assertEqual(result['session_id'], 'test-123')
+        finally:
+            utils.INDEX_FILE = original_index_file
 
     def test_load_missing_index(self):
         """Test loading when index doesn't exist."""
-        with patch.object(Path, 'home', return_value=Path(self.temp_dir)):
-            # Remove the index file
-            (self.index_dir / 'index.json').unlink(missing_ok=True)
-            result = load_index()
+        import utils
 
-        self.assertIsNone(result)
+        # Point to a non-existent file
+        original_index_file = utils.INDEX_FILE
+        utils.INDEX_FILE = self.index_dir / 'nonexistent.json'
+        try:
+            result = load_index()
+            self.assertIsNone(result)
+        finally:
+            utils.INDEX_FILE = original_index_file
 
 
 if __name__ == '__main__':

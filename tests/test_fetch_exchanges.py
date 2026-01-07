@@ -7,126 +7,95 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 from fetch_exchanges import (
-    parse_range_arg,
-    fetch_exchanges_from_transcript,
+    search_exchanges_full_content,
+    parse_last_n,
     format_exchanges,
+    get_session_dates,
+)
+from utils import (
     truncate_text,
-    MAX_CHARS_PER_MESSAGE
+    MAX_CHARS_PER_MESSAGE,
 )
 
 
-class TestParseRangeArg(unittest.TestCase):
-    """Tests for parse_range_arg function."""
+class TestParseLastN(unittest.TestCase):
+    """Tests for parse_last_n function."""
 
-    def test_single_number(self):
-        """Test parsing a single exchange number."""
-        result = parse_range_arg('5', 100)
-        self.assertEqual(result, {5})
-
-    def test_range(self):
-        """Test parsing a range like '10-15'."""
-        result = parse_range_arg('10-15', 100)
-        self.assertEqual(result, {10, 11, 12, 13, 14, 15})
-
-    def test_comma_separated(self):
-        """Test parsing comma-separated numbers."""
-        result = parse_range_arg('1,5,10', 100)
-        self.assertEqual(result, {1, 5, 10})
-
-    def test_last_n(self):
-        """Test parsing 'lastN' format."""
-        result = parse_range_arg('last5', 100)
+    def test_last5(self):
+        """Test parsing 'last5'."""
+        result = parse_last_n('last5', 100)
         self.assertEqual(result, {96, 97, 98, 99, 100})
 
-    def test_last_n_exceeds_total(self):
+    def test_last10(self):
+        """Test parsing 'last10'."""
+        result = parse_last_n('last10', 100)
+        self.assertEqual(result, {91, 92, 93, 94, 95, 96, 97, 98, 99, 100})
+
+    def test_last_exceeds_total(self):
         """Test 'lastN' when N > total exchanges."""
-        result = parse_range_arg('last10', 5)
+        result = parse_last_n('last10', 5)
         self.assertEqual(result, {1, 2, 3, 4, 5})
 
-    def test_out_of_range_filtered(self):
-        """Test that out-of-range indices are filtered."""
-        result = parse_range_arg('95-105', 100)
-        self.assertEqual(result, {95, 96, 97, 98, 99, 100})
-
-    def test_invalid_string(self):
-        """Test with invalid string."""
-        result = parse_range_arg('invalid', 100)
+    def test_invalid_format(self):
+        """Test with invalid format."""
+        result = parse_last_n('invalid', 100)
         self.assertEqual(result, set())
 
-    def test_mixed_comma_and_range(self):
-        """Test comma-separated with ranges."""
-        result = parse_range_arg('1,5-7,10', 100)
-        self.assertEqual(result, {1, 5, 6, 7, 10})
+    def test_last_without_number(self):
+        """Test 'last' without a number."""
+        result = parse_last_n('last', 100)
+        self.assertEqual(result, set())
 
 
-class TestFetchExchangesFromTranscript(unittest.TestCase):
-    """Tests for fetch_exchanges_from_transcript function."""
+class TestSearchExchangesFullContent(unittest.TestCase):
+    """Tests for search_exchanges_full_content function."""
 
-    def setUp(self):
-        """Set up test fixtures."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.transcript_file = Path(self.temp_dir) / 'transcript.jsonl'
-
-    def tearDown(self):
-        """Clean up test fixtures."""
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_fetch_single_exchange(self):
-        """Test fetching a single exchange."""
-        # Create transcript with exchanges
-        lines = [
-            json.dumps({'type': 'user', 'message': {'content': [{'type': 'text', 'text': 'Hello'}]}, 'timestamp': '2025-01-05T09:00:00Z'}),
-            json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Hi there!'}]}, 'timestamp': '2025-01-05T09:00:05Z'}),
-            json.dumps({'type': 'user', 'message': {'content': [{'type': 'text', 'text': 'Question 2'}]}, 'timestamp': '2025-01-05T09:01:00Z'}),
-            json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Answer 2'}]}, 'timestamp': '2025-01-05T09:01:05Z'}),
+    def test_search_in_user_text(self):
+        """Test searching finds match in user text."""
+        exchanges = [
+            {'idx': 1, 'user_text': 'Help with authentication', 'assistant_text': 'Sure'},
+            {'idx': 2, 'user_text': 'Fix bug', 'assistant_text': 'Done'},
         ]
-        with open(self.transcript_file, 'w') as f:
-            f.write('\n'.join(lines))
+        result = search_exchanges_full_content(exchanges, 'authentication')
+        self.assertEqual(result, {1})
 
-        result = fetch_exchanges_from_transcript(str(self.transcript_file), {1})
+    def test_search_in_assistant_text(self):
+        """Test searching finds match in assistant text."""
+        exchanges = [
+            {'idx': 1, 'user_text': 'Help', 'assistant_text': 'Use authentication flow'},
+            {'idx': 2, 'user_text': 'Fix bug', 'assistant_text': 'Done'},
+        ]
+        result = search_exchanges_full_content(exchanges, 'authentication')
+        self.assertEqual(result, {1})
 
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]['idx'], 1)
-        self.assertEqual(result[0]['user'], 'Hello')
-        self.assertEqual(result[0]['assistant'], 'Hi there!')
+    def test_search_case_insensitive(self):
+        """Test search is case insensitive."""
+        exchanges = [
+            {'idx': 1, 'user_text': 'AUTHENTICATION issue', 'assistant_text': 'Fixed'},
+        ]
+        result = search_exchanges_full_content(exchanges, 'authentication')
+        self.assertEqual(result, {1})
 
-    def test_fetch_range(self):
-        """Test fetching a range of exchanges."""
-        # Create 5 exchanges
-        lines = []
-        for i in range(5):
-            lines.append(json.dumps({
-                'type': 'user',
-                'message': {'content': [{'type': 'text', 'text': f'User {i+1}'}]},
-                'timestamp': f'2025-01-05T09:{i:02d}:00Z'
-            }))
-            lines.append(json.dumps({
-                'type': 'assistant',
-                'message': {'content': [{'type': 'text', 'text': f'Assistant {i+1}'}]},
-                'timestamp': f'2025-01-05T09:{i:02d}:05Z'
-            }))
+    def test_search_no_matches(self):
+        """Test search with no matches."""
+        exchanges = [
+            {'idx': 1, 'user_text': 'Help with login', 'assistant_text': 'Done'},
+        ]
+        result = search_exchanges_full_content(exchanges, 'authentication')
+        self.assertEqual(result, set())
 
-        with open(self.transcript_file, 'w') as f:
-            f.write('\n'.join(lines))
-
-        result = fetch_exchanges_from_transcript(str(self.transcript_file), {2, 3, 4})
-
-        self.assertEqual(len(result), 3)
-        self.assertEqual(result[0]['idx'], 2)
-        self.assertEqual(result[1]['idx'], 3)
-        self.assertEqual(result[2]['idx'], 4)
-
-    def test_nonexistent_file(self):
-        """Test with non-existent file."""
-        result = fetch_exchanges_from_transcript('/nonexistent/file.jsonl', {1})
-        self.assertEqual(result, [])
+    def test_search_fallback_to_preview(self):
+        """Test search falls back to preview if user_text missing."""
+        exchanges = [
+            {'idx': 1, 'preview': 'authentication issue', 'assistant_text': 'Fixed'},
+        ]
+        result = search_exchanges_full_content(exchanges, 'authentication')
+        self.assertEqual(result, {1})
 
 
 class TestFormatExchanges(unittest.TestCase):
@@ -136,8 +105,8 @@ class TestFormatExchanges(unittest.TestCase):
         """Test formatting a single exchange."""
         exchanges = [{
             'idx': 1,
-            'user': 'Hello',
-            'assistant': 'Hi there!',
+            'user_text': 'Hello',
+            'assistant_text': 'Hi there!',
             'timestamp': '2025-01-05T09:00:00Z'
         }]
         result = format_exchanges(exchanges)
@@ -151,18 +120,33 @@ class TestFormatExchanges(unittest.TestCase):
         result = format_exchanges([])
         self.assertIn('No exchanges found', result)
 
-    def test_truncation_applied(self):
-        """Test that long messages are truncated."""
-        long_text = 'x' * 2000
-        exchanges = [{
-            'idx': 1,
-            'user': long_text,
-            'assistant': 'Short',
-            'timestamp': ''
-        }]
-        result = format_exchanges(exchanges)
 
-        self.assertIn('[...truncated...]', result)
+class TestGetSessionDates(unittest.TestCase):
+    """Tests for get_session_dates function."""
+
+    def test_single_date(self):
+        """Test with exchanges from single date."""
+        exchanges = [
+            {'idx': 1, 'timestamp': '2025-01-05T09:00:00Z'},
+            {'idx': 2, 'timestamp': '2025-01-05T10:00:00Z'},
+        ]
+        result = get_session_dates(exchanges)
+        self.assertEqual(result, ['2025-01-05'])
+
+    def test_multiple_dates(self):
+        """Test with exchanges from multiple dates."""
+        exchanges = [
+            {'idx': 1, 'timestamp': '2025-01-05T09:00:00Z'},
+            {'idx': 2, 'timestamp': '2025-01-06T10:00:00Z'},
+            {'idx': 3, 'timestamp': '2025-01-07T11:00:00Z'},
+        ]
+        result = get_session_dates(exchanges)
+        self.assertEqual(result, ['2025-01-05', '2025-01-06', '2025-01-07'])
+
+    def test_empty_exchanges(self):
+        """Test with empty exchanges list."""
+        result = get_session_dates([])
+        self.assertEqual(result, [])
 
 
 class TestTruncateText(unittest.TestCase):

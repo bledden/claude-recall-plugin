@@ -7,19 +7,26 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-# Add hooks directory to path
+# Add hooks and scripts directories to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'hooks'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 from save_context_snapshot import (
+    get_transcript_size,
+    parse_transcript_from_offset,
+    build_new_exchanges,
+    load_existing_index,
+    save_index,
+)
+from utils import (
     extract_text_content,
     make_preview,
-    parse_transcript_with_timestamps,
     truncate_text,
-    build_exchange_index,
     PREVIEW_LENGTH,
-    MAX_CHARS_PER_MESSAGE
+    MAX_CHARS_PER_MESSAGE,
+    INDEX_DIR,
+    INDEX_FILE,
 )
 
 
@@ -83,8 +90,8 @@ class TestMakePreview(unittest.TestCase):
         self.assertIn('Line 1', result)
 
 
-class TestParseTranscriptWithTimestamps(unittest.TestCase):
-    """Tests for parse_transcript_with_timestamps function."""
+class TestParseTranscriptFromOffset(unittest.TestCase):
+    """Tests for parse_transcript_from_offset function."""
 
     def setUp(self):
         """Set up test fixtures."""
@@ -113,22 +120,25 @@ class TestParseTranscriptWithTimestamps(unittest.TestCase):
         with open(self.transcript_file, 'w') as f:
             f.write('\n'.join(lines))
 
-        result = parse_transcript_with_timestamps(str(self.transcript_file))
+        result, offset = parse_transcript_from_offset(str(self.transcript_file))
 
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]['role'], 'user')
         self.assertEqual(result[0]['text'], 'Hello')
         self.assertEqual(result[0]['timestamp'], '2025-01-05T09:00:00Z')
+        self.assertGreater(offset, 0)
 
     def test_empty_path(self):
         """Test with empty path."""
-        result = parse_transcript_with_timestamps('')
+        result, offset = parse_transcript_from_offset('')
         self.assertEqual(result, [])
+        self.assertEqual(offset, 0)
 
     def test_nonexistent_file(self):
         """Test with non-existent file."""
-        result = parse_transcript_with_timestamps('/nonexistent/file.jsonl')
+        result, offset = parse_transcript_from_offset('/nonexistent/file.jsonl')
         self.assertEqual(result, [])
+        self.assertEqual(offset, 0)
 
 
 class TestTruncateText(unittest.TestCase):
@@ -148,11 +158,11 @@ class TestTruncateText(unittest.TestCase):
         self.assertIn('[...truncated...]', result)
 
 
-class TestBuildExchangeIndex(unittest.TestCase):
-    """Tests for build_exchange_index function."""
+class TestBuildNewExchanges(unittest.TestCase):
+    """Tests for build_new_exchanges function."""
 
-    def test_builds_index_and_recent(self):
-        """Test building index and recent exchanges."""
+    def test_builds_exchanges(self):
+        """Test building exchanges from messages."""
         messages = [
             {'role': 'user', 'text': 'Question 1', 'timestamp': '2025-01-05T09:00:00Z'},
             {'role': 'assistant', 'text': 'Answer 1', 'timestamp': '2025-01-05T09:00:05Z'},
@@ -160,44 +170,81 @@ class TestBuildExchangeIndex(unittest.TestCase):
             {'role': 'assistant', 'text': 'Answer 2', 'timestamp': '2025-01-05T09:01:05Z'},
         ]
 
-        full_index, recent = build_exchange_index(messages)
+        exchanges = build_new_exchanges(messages)
 
-        self.assertEqual(len(full_index), 2)
-        self.assertEqual(full_index[0]['idx'], 1)
-        self.assertEqual(full_index[0]['preview'], 'Question 1')
-
-        self.assertEqual(len(recent), 2)
-        self.assertEqual(recent[0]['user'], 'Question 1')
+        self.assertEqual(len(exchanges), 2)
+        self.assertEqual(exchanges[0]['idx'], 1)
+        self.assertIn('preview', exchanges[0])
+        self.assertIn('user_text', exchanges[0])
+        self.assertIn('assistant_text', exchanges[0])
 
     def test_empty_messages(self):
         """Test with empty message list."""
-        full_index, recent = build_exchange_index([])
-        self.assertEqual(len(full_index), 0)
-        self.assertEqual(len(recent), 0)
+        exchanges = build_new_exchanges([])
+        self.assertEqual(len(exchanges), 0)
 
     def test_unpaired_messages(self):
         """Test with unpaired messages."""
         messages = [
             {'role': 'user', 'text': 'Question 1', 'timestamp': ''},
-            {'role': 'user', 'text': 'Question 2', 'timestamp': ''},  # No assistant response
+            {'role': 'user', 'text': 'Question 2', 'timestamp': ''},
             {'role': 'assistant', 'text': 'Answer', 'timestamp': ''},
         ]
 
-        full_index, recent = build_exchange_index(messages)
+        exchanges = build_new_exchanges(messages)
 
         # Only one complete pair: Question 2 -> Answer
-        self.assertEqual(len(full_index), 1)
+        self.assertEqual(len(exchanges), 1)
 
-    def test_index_has_timestamps(self):
-        """Test that index entries include timestamps."""
+    def test_exchanges_have_timestamps(self):
+        """Test that exchanges include timestamps."""
         messages = [
             {'role': 'user', 'text': 'Q', 'timestamp': '2025-01-05T14:30:00Z'},
             {'role': 'assistant', 'text': 'A', 'timestamp': '2025-01-05T14:30:05Z'},
         ]
 
-        full_index, _ = build_exchange_index(messages)
+        exchanges = build_new_exchanges(messages)
 
-        self.assertEqual(full_index[0]['timestamp'], '2025-01-05T14:30:00Z')
+        self.assertEqual(exchanges[0]['timestamp'], '2025-01-05T14:30:00Z')
+
+    def test_custom_start_idx(self):
+        """Test starting at a custom index."""
+        messages = [
+            {'role': 'user', 'text': 'Q', 'timestamp': ''},
+            {'role': 'assistant', 'text': 'A', 'timestamp': ''},
+        ]
+
+        exchanges = build_new_exchanges(messages, start_idx=10)
+
+        self.assertEqual(exchanges[0]['idx'], 10)
+
+
+class TestGetTranscriptSize(unittest.TestCase):
+    """Tests for get_transcript_size function."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.transcript_file = Path(self.temp_dir) / 'transcript.jsonl'
+
+    def tearDown(self):
+        """Clean up test fixtures."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_existing_file(self):
+        """Test getting size of existing file."""
+        content = 'Hello world\n'
+        with open(self.transcript_file, 'w') as f:
+            f.write(content)
+
+        result = get_transcript_size(str(self.transcript_file))
+        self.assertEqual(result, len(content))
+
+    def test_nonexistent_file(self):
+        """Test getting size of non-existent file."""
+        result = get_transcript_size('/nonexistent/file.jsonl')
+        self.assertEqual(result, 0)
 
 
 class TestMainHookBehavior(unittest.TestCase):
