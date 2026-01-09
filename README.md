@@ -18,9 +18,21 @@ Custom plugins now **require a marketplace structure** to work reliably with the
 
 ## Installation
 
-### Option 1: Create a Local Marketplace (Recommended for VSCode)
+### Option 1: Use Pre-Built Marketplace (Recommended for VSCode)
 
 This is the only reliable method for the VSCode extension until the plugin is approved in the official marketplace.
+
+```bash
+claude plugin marketplace add https://github.com/bledden/claude-recall-marketplace
+claude plugin install recall@recall-local
+```
+
+The plugin will now persist across sessions in both CLI and VSCode.
+
+<details>
+<summary><strong>Alternative: Build Your Own Marketplace</strong></summary>
+
+If you prefer to create your own local marketplace:
 
 **Step 1: Clone and set up marketplace structure**
 
@@ -66,7 +78,7 @@ claude plugin marketplace add /path/to/claude-recall-marketplace
 claude plugin install recall@recall-local
 ```
 
-The plugin will now persist across sessions in both CLI and VSCode.
+</details>
 
 ### Option 2: Shell Alias (CLI Only)
 
