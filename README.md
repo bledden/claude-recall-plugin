@@ -10,33 +10,48 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that help
 
 ## Installation
 
-### Option 1: Direct Loading (Recommended Until Marketplace Approval)
+> **⚠️ Important:** Until this plugin is approved in the official marketplace, you must either set up a shell alias (recommended) or manually specify `--plugin-dir` every time you start Claude Code. The plugin will not persist across sessions otherwise.
 
-Clone the repository and load the plugin directly:
+### Step 1: Clone the Repository
 
 ```bash
-# Clone the plugin
 git clone https://github.com/bledden/claude-recall-plugin.git
+cd claude-recall-plugin
+```
 
-# Run Claude Code with the plugin loaded
+### Step 2: Set Up Persistent Loading (Required)
+
+Add an alias to your shell profile so the plugin loads automatically every session:
+
+**For Zsh (default on macOS):**
+```bash
+echo "alias claude='claude --plugin-dir $(pwd)'" >> ~/.zshrc
+source ~/.zshrc
+```
+
+**For Bash:**
+```bash
+echo "alias claude='claude --plugin-dir $(pwd)'" >> ~/.bashrc
+source ~/.bashrc
+```
+
+Now `claude` will always load the plugin.
+
+### Alternative: Manual Loading (Every Session)
+
+If you don't want to set up an alias, you must run this every time you start Claude Code:
+
+```bash
 claude --plugin-dir /path/to/claude-recall-plugin
 ```
 
-To make this permanent, add an alias to your shell profile (`~/.zshrc` or `~/.bashrc`):
-
-```bash
-alias claude='claude --plugin-dir /path/to/claude-recall-plugin'
-```
-
-Then restart your terminal or run `source ~/.zshrc`.
-
-### Option 2: Plugin Install Command
+### Alternative: Plugin Install Command
 
 ```bash
 claude plugins install https://github.com/bledden/claude-recall-plugin
 ```
 
-> **Note:** If `/recall` doesn't appear after using the install command, use **Option 1** instead. The `--plugin-dir` flag is the most reliable method until the plugin is officially in the marketplace.
+> **Note:** The install command may not reliably persist the plugin across sessions or restarts. If `/recall` disappears, use the alias method above instead.
 
 ## Quick Start
 
