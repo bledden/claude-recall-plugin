@@ -8,50 +8,93 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that help
 
 ---
 
+## ⚠️ UPDATE: Claude Code 2.1.x Breaking Change
+
+**As of Claude Code 2.1.x, local plugins no longer persist across sessions.** This is an undocumented breaking change from 2.0.x behavior. See [issue #17089](https://github.com/anthropics/claude-code/issues/17089).
+
+Custom plugins now **require a marketplace structure** to work reliably with the VSCode extension. The `--plugin-dir` flag only works with the CLI, not VSCode.
+
+---
+
 ## Installation
 
-> **⚠️ Important:** Until this plugin is approved in the official marketplace, you must either set up a shell alias (recommended) or manually specify `--plugin-dir` every time you start Claude Code. The plugin will not persist across sessions otherwise.
+### Option 1: Create a Local Marketplace (Recommended for VSCode)
 
-### Step 1: Clone the Repository
+This is the only reliable method for the VSCode extension until the plugin is approved in the official marketplace.
+
+**Step 1: Clone and set up marketplace structure**
+
+```bash
+# Clone this repo
+git clone https://github.com/bledden/claude-recall-plugin.git
+
+# Create a marketplace wrapper
+mkdir -p claude-recall-marketplace/.claude-plugin
+mkdir -p claude-recall-marketplace/plugins
+cp -R claude-recall-plugin claude-recall-marketplace/plugins/recall
+```
+
+**Step 2: Create the marketplace manifest**
+
+Create `claude-recall-marketplace/.claude-plugin/marketplace.json`:
+
+```json
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "recall-local",
+  "version": "1.0.0",
+  "description": "Local marketplace for the recall plugin",
+  "owner": {
+    "name": "your-name",
+    "email": "your-email@example.com"
+  },
+  "plugins": [
+    {
+      "name": "recall",
+      "description": "Recover conversation context when Claude loses track",
+      "source": "./plugins/recall",
+      "category": "productivity"
+    }
+  ]
+}
+```
+
+**Step 3: Register and install**
+
+```bash
+claude plugin marketplace add /path/to/claude-recall-marketplace
+claude plugin install recall@recall-local
+```
+
+The plugin will now persist across sessions in both CLI and VSCode.
+
+### Option 2: Shell Alias (CLI Only)
+
+This method works for the terminal but **does not work with the VSCode extension**.
 
 ```bash
 git clone https://github.com/bledden/claude-recall-plugin.git
-cd claude-recall-plugin
 ```
-
-### Step 2: Set Up Persistent Loading (Required)
-
-Add an alias to your shell profile so the plugin loads automatically every session:
 
 **For Zsh (default on macOS):**
 ```bash
-echo "alias claude='claude --plugin-dir $(pwd)'" >> ~/.zshrc
+echo "alias claude='claude --plugin-dir /path/to/claude-recall-plugin'" >> ~/.zshrc
 source ~/.zshrc
 ```
 
 **For Bash:**
 ```bash
-echo "alias claude='claude --plugin-dir $(pwd)'" >> ~/.bashrc
+echo "alias claude='claude --plugin-dir /path/to/claude-recall-plugin'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Now `claude` will always load the plugin.
-
-### Alternative: Manual Loading (Every Session)
-
-If you don't want to set up an alias, you must run this every time you start Claude Code:
-
-```bash
-claude --plugin-dir /path/to/claude-recall-plugin
-```
-
-### Alternative: Plugin Install Command
+### Option 3: Plugin Install Command (Not Recommended)
 
 ```bash
 claude plugins install https://github.com/bledden/claude-recall-plugin
 ```
 
-> **Note:** The install command may not reliably persist the plugin across sessions or restarts. If `/recall` disappears, use the alias method above instead.
+> **⚠️ Warning:** This method does not reliably persist in Claude Code 2.1.x. The plugin may disappear after restarting. Use Option 1 instead.
 
 ## Quick Start
 
