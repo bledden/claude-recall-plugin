@@ -113,7 +113,7 @@ claude plugins install https://github.com/bledden/claude-recall-plugin
 When Claude seems to have lost context, simply run:
 
 ```
-/recall
+/recall:recall
 ```
 
 This will:
