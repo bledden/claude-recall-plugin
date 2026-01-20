@@ -5,6 +5,15 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that help
 > **📋 Marketplace Status:** This plugin has been submitted to the official Claude Code plugins repository and is awaiting approval.
 >
 > **PR:** [anthropics/claude-code#16680](https://github.com/anthropics/claude-code/pull/16680)
+>
+> **Pre-built Marketplace:** [claude-recall-marketplace](https://github.com/bledden/claude-recall-marketplace) (for easy installation until approved)
+
+---
+
+## Requirements
+
+- **Claude Code** 2.0.x or 2.1.x (see breaking change note below for 2.1.x)
+- **Python 3.6+** (for hook and script execution)
 
 ---
 
@@ -406,6 +415,41 @@ python3 -m unittest discover -v tests/
 2. Make your changes
 3. Run tests: `python3 -m unittest discover -v tests/`
 4. Submit a pull request
+
+---
+
+## Known Limitations
+
+- **Claude Cowork not supported** - This is a Claude Code plugin; it does not work with Claude Cowork (which uses Skills/Connectors instead of plugins)
+- **Single session tracking** - Only the current session is indexed; previous session data is overwritten when a new session starts
+- **VSCode extension requires marketplace** - Due to a [breaking change in 2.1.x](https://github.com/anthropics/claude-code/issues/17089), the VSCode extension requires the marketplace installation method
+
+---
+
+## Uninstalling
+
+**If installed via marketplace:**
+```bash
+claude plugin uninstall recall@recall-local
+claude plugin marketplace remove recall-local
+```
+
+**If using shell alias:**
+Remove the alias line from your `~/.zshrc` or `~/.bashrc`, then run `source ~/.zshrc` or `source ~/.bashrc`.
+
+---
+
+## Changelog
+
+### 1.0.0 (January 2026)
+- Initial release
+- Interactive `/recall` command with menu
+- Quick commands: `last5`, `last10`, `search`, `around`
+- Full-content search across user prompts and assistant responses
+- Multi-day session support with date grouping
+- Incremental indexing with byte offset tracking
+- Observability logging to `~/.claude/recall-events.log`
+- 91 unit tests
 
 ---
 
