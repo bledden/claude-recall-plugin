@@ -37,13 +37,9 @@ Custom plugins now **require a marketplace structure** to work reliably with the
 5. Enter: `https://github.com/bledden/claude-recall-plugin`
 
 **From zip file:**
-1. [Download the latest release](https://github.com/bledden/claude-recall-plugin/releases) or create a zip:
-   ```bash
-   git clone https://github.com/bledden/claude-recall-plugin.git
-   zip -r claude-recall-plugin.zip claude-recall-plugin/ -x "*.git*" "*__pycache__*"
-   ```
+1. **[Download claude-recall-plugin.zip](https://github.com/bledden/claude-recall-plugin/releases/latest/download/claude-recall-plugin.zip)**
 2. In the Cowork **Plugins** sidebar, click **"Upload plugin"**
-3. Select the `claude-recall-plugin.zip` file
+3. Select the downloaded `claude-recall-plugin.zip` file
 
 The plugin will appear in your Cowork plugins list. Invoke with `/recall` during a Cowork session.
 
