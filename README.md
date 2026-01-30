@@ -12,7 +12,7 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that help
 
 ## Requirements
 
-- **Claude Code** 2.0.x or 2.1.x (see breaking change note below for 2.1.x)
+- **Claude Code** 2.0.x or 2.1.x (see breaking change note below for 2.1.x), or **Claude Cowork** (macOS desktop app)
 - **Python 3.6+** (for hook and script execution)
 
 ---
@@ -27,7 +27,27 @@ Custom plugins now **require a marketplace structure** to work reliably with the
 
 ## Installation
 
-### Option 1: Use Pre-Built Marketplace (Recommended for VSCode)
+### Claude Cowork (macOS Desktop App)
+
+**From GitHub:**
+1. Open the Claude Desktop app
+2. Navigate to the **Cowork** tab
+3. Click **"Plugins"** in the left sidebar
+4. Click **"Add from GitHub"**
+5. Enter: `https://github.com/bledden/claude-recall-plugin`
+
+**From zip file:**
+1. [Download the latest release](https://github.com/bledden/claude-recall-plugin/releases) or create a zip:
+   ```bash
+   git clone https://github.com/bledden/claude-recall-plugin.git
+   zip -r claude-recall-plugin.zip claude-recall-plugin/ -x "*.git*" "*__pycache__*"
+   ```
+2. In the Cowork **Plugins** sidebar, click **"Upload plugin"**
+3. Select the `claude-recall-plugin.zip` file
+
+The plugin will appear in your Cowork plugins list. Invoke with `/recall` during a Cowork session.
+
+### Claude Code: Option 1 - Pre-Built Marketplace (Recommended for VSCode)
 
 This is the only reliable method for the VSCode extension until the plugin is approved in the official marketplace.
 
@@ -89,7 +109,7 @@ claude plugin install recall@recall-local
 
 </details>
 
-### Option 2: Shell Alias (CLI Only)
+### Claude Code: Option 2 - Shell Alias (CLI Only)
 
 This method works for the terminal but **does not work with the VSCode extension**.
 
@@ -109,7 +129,7 @@ echo "alias claude='claude --plugin-dir /path/to/claude-recall-plugin'" >> ~/.ba
 source ~/.bashrc
 ```
 
-### Option 3: Plugin Install Command (Not Recommended)
+### Claude Code: Option 3 - Plugin Install Command (Not Recommended)
 
 ```bash
 claude plugins install https://github.com/bledden/claude-recall-plugin
@@ -420,7 +440,7 @@ python3 -m unittest discover -v tests/
 
 ## Known Limitations
 
-- **Claude Cowork not supported** - This is a Claude Code plugin; it does not work with Claude Cowork (which uses Skills/Connectors instead of plugins)
+- **Claude Cowork requires zip upload** - Cowork does not yet support marketplace installation; upload the plugin zip file manually via the Plugins sidebar
 - **Single session tracking** - Only the current session is indexed; previous session data is overwritten when a new session starts
 - **VSCode extension requires marketplace** - Due to a [breaking change in 2.1.x](https://github.com/anthropics/claude-code/issues/17089), the VSCode extension requires the marketplace installation method
 
@@ -440,6 +460,13 @@ Remove the alias line from your `~/.zshrc` or `~/.bashrc`, then run `source ~/.z
 ---
 
 ## Changelog
+
+### 1.0.1 (January 2026)
+- Added Claude Cowork support (zip upload via Plugins sidebar)
+- Updated installation docs for Claude Code 2.1.x marketplace requirement
+- Added pre-built marketplace for easier Claude Code installation
+- Fixed Python 3.15 deprecation warning in date parsing
+- Fixed all test imports for refactored module structure
 
 ### 1.0.0 (January 2026)
 - Initial release
