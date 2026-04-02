@@ -14,15 +14,17 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
 from utils import extract_text_content, make_preview, truncate_text, MAX_CHARS_PER_MESSAGE
 from db import (get_connection, insert_session, get_session, insert_exchanges,
-                update_session_offset, get_exchanges, insert_tag, DB_PATH)
+                update_session_offset, get_exchanges, insert_tag, DB_PATH,
+                get_connections, get_highlights, update_connection_check)
 from auto_tagger import compute_auto_tags
+from highlight import auto_detect_highlights
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -246,6 +248,87 @@ def _store_auto_tags(conn, session_id: str, exchanges: List[Dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Connection checks
+# ---------------------------------------------------------------------------
+
+def _check_connections(conn, session_id: str) -> Optional[str]:
+    """Check connections for new highlights. Returns system message or None.
+
+    Iterates all connections for the session.  Connections in 'explicit' mode
+    are skipped (the user checks manually via /recall inbox).  For 'decay'
+    mode connections the counter is incremented each call; when it reaches the
+    interval, highlights are fetched from the target session and a formatted
+    message is assembled.  The counter then resets and the interval grows by 3
+    (capped at 30) to create exponential back-off.
+
+    Only connections with delivery_mode == 'inject' produce a returned message;
+    'silent' connections still update their counter but return nothing.
+
+    Args:
+        conn: SQLite connection.
+        session_id: The watcher session ID.
+
+    Returns:
+        A formatted multi-line string if there are new highlights to surface,
+        or None if nothing should be injected.
+    """
+    connections = get_connections(conn, session_id)
+    if not connections:
+        return None
+
+    messages = []
+    for connection in connections:
+        if connection['check_mode'] == 'explicit':
+            continue  # User checks manually via /recall inbox
+
+        # Decay mode: increment counter
+        counter = (connection['check_counter'] or 0) + 1
+        interval = connection['check_interval'] or 7
+
+        if counter >= interval:
+            # Time to check
+            last_checked = connection['last_checked_at']
+            target_highlights = get_highlights(conn, connection['target_session'], since=last_checked)
+
+            connection_messages = []
+            if target_highlights:
+                for h in target_highlights:
+                    connection_messages.append(f'  - "{h["summary"]}" [{h["tags"]}]')
+
+                if connection_messages and connection['delivery_mode'] == 'inject':
+                    topic = connection['topic']
+                    target_id = connection['target_session'][:8]
+                    connection_messages.insert(
+                        0,
+                        f'[Cross-session] New from session {target_id}... ({topic}):',
+                    )
+                    connection_messages.append(
+                        f'Use /recall search <keyword> --session {connection["target_session"]}'
+                        ' for full context.'
+                    )
+                    messages.extend(connection_messages)
+
+            # Reset counter, grow interval (decay back-off)
+            now = datetime.now(timezone.utc).isoformat()
+            new_interval = min(30, interval + 3)
+            update_connection_check(conn, connection['id'], 0, new_interval, now)
+        else:
+            # Just increment counter, preserve last_checked_at
+            update_connection_check(
+                conn,
+                connection['id'],
+                counter,
+                interval,
+                connection['last_checked_at'],
+            )
+
+    if not messages:
+        return None
+
+    return '\n'.join(messages)
+
+
+# ---------------------------------------------------------------------------
 # Core hook logic
 # ---------------------------------------------------------------------------
 
@@ -301,6 +384,8 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
         if transcript_path and os.path.exists(transcript_path):
             current_size = os.path.getsize(transcript_path)
 
+        new_exchanges_list: List[Dict] = []
+
         if current_size > byte_offset:
             new_messages, new_offset = parse_transcript_from_offset(transcript_path, byte_offset)
 
@@ -309,12 +394,12 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
                 existing = get_exchanges(conn, session_id)
                 start_idx = len(existing) + 1
 
-                new_exchanges = build_new_exchanges(new_messages, start_idx)
+                new_exchanges_list = build_new_exchanges(new_messages, start_idx)
 
-                if new_exchanges:
-                    insert_exchanges(conn, session_id, new_exchanges)
+                if new_exchanges_list:
+                    insert_exchanges(conn, session_id, new_exchanges_list)
 
-                total_count = len(existing) + len(new_exchanges)
+                total_count = len(existing) + len(new_exchanges_list)
                 update_session_offset(conn, session_id, new_offset, total_count)
             else:
                 # File grew but no complete messages yet — still advance offset
@@ -329,6 +414,13 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
         all_exchanges = get_exchanges(conn, session_id)
         _store_auto_tags(conn, session_id, all_exchanges)
 
+        # Auto-detect highlights (if enabled)
+        if new_exchanges_list:
+            auto_detect_highlights(conn, session_id, new_exchanges_list)
+
+        # Check connections for incoming highlights
+        connection_msg = _check_connections(conn, session_id)
+
         # Handle /recall
         if user_prompt.strip().lower().startswith('/recall'):
             exchange_count = len(all_exchanges)
@@ -336,6 +428,8 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
             return {
                 "systemMessage": f"[Observability] Context recall logged at exchange #{exchange_count}"
             }
+        elif connection_msg:
+            return {"systemMessage": connection_msg}
 
         return {}
 

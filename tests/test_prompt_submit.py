@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
 from prompt_submit import build_new_exchanges, run_hook
-from db import get_connection, get_session, get_exchanges
+from db import (get_connection, get_session, get_exchanges,
+                insert_connection, insert_highlight, set_session_config)
 
 
 def _write_transcript(path, entries):
@@ -223,6 +224,107 @@ class TestRunHook(unittest.TestCase):
             self.assertIn('sess-001', content)
         finally:
             prompt_submit.LOG_FILE = original_log
+
+
+    def test_connection_check_injects_on_decay(self):
+        """Test that connection check fires on decay schedule and injects highlights."""
+        # Create watcher session and target session in the DB
+        watcher_id = 'sess-watcher'
+        target_id = 'sess-target'
+
+        # Write transcripts for both sessions so they exist in the DB
+        target_transcript = Path(self.temp_dir) / 'transcript_target.jsonl'
+        target_entries = [
+            _make_entry('user', 'Q target', '2025-01-05T09:00:00Z'),
+            _make_entry('assistant', 'A target', '2025-01-05T09:00:05Z'),
+        ]
+        _write_transcript(target_transcript, target_entries)
+        run_hook(self._base_input(session_id=target_id,
+                                  transcript_path=str(target_transcript)),
+                 db_path=self.db_path)
+
+        _write_transcript(self.transcript_path, [
+            _make_entry('user', 'Q watcher', '2025-01-05T09:01:00Z'),
+            _make_entry('assistant', 'A watcher', '2025-01-05T09:01:05Z'),
+        ])
+        run_hook(self._base_input(session_id=watcher_id), db_path=self.db_path)
+
+        # Set up connection with check_mode='auto' (decay) and delivery_mode='inject'
+        # and check_interval=1 so the first run triggers
+        conn = get_connection(self.db_path)
+        insert_connection(conn, watcher_id, target_id, 'kernel work',
+                          check_mode='auto', delivery_mode='inject')
+        # Set interval to 1 so the very next hook call fires
+        conn.execute(
+            "UPDATE connections SET check_interval = 1 WHERE watcher_session = ?",
+            (watcher_id,)
+        )
+        conn.commit()
+
+        # Add a highlight to the target session
+        insert_highlight(conn, target_id, 'Fixed coalescing bug', 'perf', 'explicit')
+        conn.close()
+
+        # Run hook for watcher — counter starts at 0, interval=1, so 0+1 >= 1 → fires
+        result = run_hook(self._base_input(session_id=watcher_id), db_path=self.db_path)
+
+        self.assertIn('systemMessage', result)
+        self.assertIn('Cross-session', result['systemMessage'])
+        self.assertIn('Fixed coalescing bug', result['systemMessage'])
+        self.assertIn(target_id[:8], result['systemMessage'])
+
+    def test_auto_detect_runs_when_enabled(self):
+        """Test that auto_detect_highlights runs in the hook when config is set."""
+        session_id = 'sess-autodetect'
+
+        # Write transcript with a strong solution-signal response
+        solution_text = (
+            'The fix is to use __shared__ memory. The solution resolves the issue '
+            'because shared memory has much lower latency than global. '
+            'Resolved by moving the accumulator into shared memory. '
+            'Fixed by adding the proper synchronization barriers. '
+            'This works because thread blocks share L1 cache.'
+        )
+        entries = [
+            _make_entry('user', 'Why is my kernel slow?', '2025-01-05T09:00:00Z'),
+            _make_entry('assistant', solution_text, '2025-01-05T09:00:05Z'),
+        ]
+        _write_transcript(self.transcript_path, entries)
+
+        # First run to register the session
+        run_hook(self._base_input(session_id=session_id), db_path=self.db_path)
+
+        # Enable auto_highlight on the session
+        conn = get_connection(self.db_path)
+        set_session_config(conn, session_id, 'auto_highlight', True)
+        conn.close()
+
+        # Append more content so the transcript grows (triggers incremental parse)
+        solution_text2 = (
+            'The answer is to align your memory accesses. Try using vectorized loads. '
+            'The issue was misaligned 128-byte transactions causing cache thrashing. '
+            'The problem was solved by padding the shared memory array. '
+            'This works because aligned accesses coalesce into single transactions.'
+        )
+        with open(self.transcript_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(_make_entry('user', 'What about memory?',
+                                           '2025-01-05T09:02:00Z')) + '\n')
+            f.write(json.dumps(_make_entry('assistant', solution_text2,
+                                           '2025-01-05T09:02:05Z')) + '\n')
+
+        run_hook(self._base_input(session_id=session_id), db_path=self.db_path)
+
+        # Verify a highlight was auto-created
+        conn = get_connection(self.db_path)
+        cur = conn.execute(
+            "SELECT * FROM highlights WHERE session_id = ? AND source = 'auto'",
+            (session_id,)
+        )
+        highlights = cur.fetchall()
+        conn.close()
+
+        self.assertGreater(len(highlights), 0,
+                           "Expected at least one auto-detected highlight")
 
 
 if __name__ == '__main__':
