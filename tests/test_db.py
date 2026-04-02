@@ -271,6 +271,28 @@ class TestFTS5Search(unittest.TestCase):
         results = search_exchanges_fts(self.conn, 'quantum')
         self.assertGreaterEqual(len(results), 2)
 
+    def test_multi_word_search_matches_non_adjacent_terms(self):
+        """Multi-word query matches when both terms appear anywhere, not just as adjacent phrase."""
+        # "quantum" and "qubits" appear in the same exchange but not adjacent
+        # ("quantum computing uses qubits")
+        results = search_exchanges_fts(self.conn, 'quantum qubits')
+        self.assertGreaterEqual(len(results), 1)
+
+    def test_multi_word_search_no_match_when_one_term_missing(self):
+        """Multi-word AND search requires ALL terms present."""
+        # "quantum" exists but "blockchain" does not
+        results = search_exchanges_fts(self.conn, 'quantum blockchain')
+        self.assertEqual(len(results), 0)
+
+    def test_quoted_phrase_search_requires_adjacency(self):
+        """User-quoted phrase search requires exact adjacent match."""
+        # "quantum computing" is an exact phrase in the text
+        results = search_exchanges_fts(self.conn, '"quantum computing"')
+        self.assertGreaterEqual(len(results), 1)
+        # "computing quantum" is NOT an adjacent phrase
+        results2 = search_exchanges_fts(self.conn, '"computing quantum"')
+        self.assertEqual(len(results2), 0)
+
 
 class TestCrossSessionSearch(unittest.TestCase):
     """Tests for search across sessions and projects."""

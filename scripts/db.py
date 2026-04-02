@@ -304,6 +304,32 @@ def get_exchanges(conn: sqlite3.Connection, session_id: str,
 # Search
 # ---------------------------------------------------------------------------
 
+def _build_fts_query(query: str) -> str:
+    """Build an FTS5 query from user input.
+
+    If the query is wrapped in double quotes, treat it as an exact phrase match.
+    Otherwise, split into individual terms and AND them together so that
+    "warp divergence" matches text containing both words in any order/position.
+    """
+    query = query.strip()
+    if query.startswith('"') and query.endswith('"') and len(query) > 2:
+        # User explicitly wants phrase match — pass through, escape internal quotes
+        inner = query[1:-1].replace('"', '""')
+        return '"' + inner + '"'
+
+    # Split into terms, quote each individually, AND them together
+    terms = query.split()
+    if not terms:
+        return '""'
+    if len(terms) == 1:
+        # Single term — quote it for safety
+        return '"' + terms[0].replace('"', '""') + '"'
+
+    # Multiple terms: "term1" AND "term2" AND ...
+    quoted = ['"' + t.replace('"', '""') + '"' for t in terms]
+    return ' AND '.join(quoted)
+
+
 def search_exchanges_fts(conn: sqlite3.Connection, query: str,
                          session_id: Optional[str] = None,
                          project_hash: Optional[str] = None,
@@ -320,8 +346,7 @@ def search_exchanges_fts(conn: sqlite3.Connection, query: str,
     Returns:
         List of exchange dicts matching the query.
     """
-    # Quote the query for phrase-safe matching
-    safe_query = '"' + query.replace('"', '""') + '"'
+    safe_query = _build_fts_query(query)
 
     sql = (
         "SELECT e.* FROM exchanges e "
@@ -355,7 +380,7 @@ def search_exchanges_global(conn: sqlite3.Connection, query: str,
     Returns:
         List of dicts — exchange fields plus project_path and session_started.
     """
-    safe_query = '"' + query.replace('"', '""') + '"'
+    safe_query = _build_fts_query(query)
 
     sql = (
         "SELECT e.*, s.project_path, s.started_at AS session_started "
