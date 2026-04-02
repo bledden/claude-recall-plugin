@@ -9,6 +9,7 @@ Pure stdlib — no external dependencies.
 """
 
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -35,8 +36,8 @@ MIN_WORD_COUNT_FOR_AUTO = 25  # Reject short/generic responses to avoid false po
 # ---------------------------------------------------------------------------
 
 
-def create_highlight(conn, session_id: str, summary: str,
-                     exchange_idx: int = None) -> str:
+def create_highlight(conn: sqlite3.Connection, session_id: str, summary: str,
+                     exchange_idx: Optional[int] = None) -> str:
     """Create a highlight explicitly (Claude-triggered).
 
     Fetches the session's auto-tags, builds a comma-joined tags string, then
@@ -98,8 +99,9 @@ def detect_solution_signals(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def auto_detect_highlights(conn, session_id: str,
-                            new_exchanges: List[Dict]) -> List[str]:
+def auto_detect_highlights(conn: sqlite3.Connection, session_id: str,
+                            new_exchanges: List[Dict],
+                            commit: bool = True) -> List[str]:
     """Scan new exchanges for solution signals and auto-create highlights.
 
     Only runs when the session's 'auto_highlight' config key is truthy.
@@ -153,7 +155,8 @@ def auto_detect_highlights(conn, session_id: str,
             summary = prefix + cleaned
 
         insert_highlight(conn, session_id, summary, tags,
-                         source='auto', exchange_idx=exchange_idx)
+                         source='auto', exchange_idx=exchange_idx,
+                         commit=commit)
         created_summaries.append(summary)
 
     return created_summaries

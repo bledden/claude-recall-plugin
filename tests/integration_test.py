@@ -258,7 +258,9 @@ class TestMigrationFromV1(unittest.TestCase):
         # Step 3 — prompt_hook() with new session_id → triggers migration     #
         # ------------------------------------------------------------------ #
         original_legacy_file = prompt_submit.LEGACY_INDEX_FILE
+        original_migration_checked = prompt_submit._migration_checked
         prompt_submit.LEGACY_INDEX_FILE = self.legacy_index
+        prompt_submit._migration_checked = False  # reset so migration runs
         try:
             result = prompt_hook(
                 {
@@ -272,6 +274,7 @@ class TestMigrationFromV1(unittest.TestCase):
             )
         finally:
             prompt_submit.LEGACY_INDEX_FILE = original_legacy_file
+            prompt_submit._migration_checked = original_migration_checked
 
         self.assertEqual(result, {})
 

@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 from utils import extract_text_content, make_preview, truncate_text, MAX_CHARS_PER_MESSAGE
 from db import (get_connection, insert_session, get_session, insert_exchanges,
                 update_session_offset, get_exchanges, insert_tag, DB_PATH,
-                get_connections, get_highlights, update_connection_check)
+                get_connections, get_highlights, update_connection_check,
+                get_exchange_count)
 from auto_tagger import compute_auto_tags
 from highlight import auto_detect_highlights
 
@@ -32,6 +33,9 @@ from highlight import auto_detect_highlights
 
 LOG_FILE = Path.home() / '.claude' / 'recall-events.log'
 LEGACY_INDEX_FILE = Path.home() / '.claude' / 'context-recall' / 'index.json'
+
+# Module-level flag: skip the filesystem stat on every prompt after first check
+_migration_checked = False
 
 
 # ---------------------------------------------------------------------------
@@ -166,14 +170,22 @@ def migrate_from_json(conn, legacy_path: Path = None) -> None:
     Reads the legacy ``index.json``, inserts its session and exchanges
     into the DB, then renames the file to ``index.json.migrated``.
 
-    No-op if the legacy file does not exist.
+    No-op if the legacy file does not exist.  After the first check the
+    module-level ``_migration_checked`` flag is set so subsequent calls
+    skip the Path.exists() stat entirely.
 
     Args:
         conn: SQLite connection.
         legacy_path: Override path for the legacy file.
     """
+    global _migration_checked
+    if _migration_checked:
+        return
+
     if legacy_path is None:
         legacy_path = LEGACY_INDEX_FILE
+
+    _migration_checked = True
 
     if not legacy_path.exists():
         return
@@ -237,25 +249,28 @@ def log_recall_event(session_id: str, exchange_count: int) -> None:
     try:
         with open(LOG_FILE, 'a', encoding='utf-8') as f:
             f.write(log_entry)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[context-recall] Failed to write log: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
 # Auto-tagging
 # ---------------------------------------------------------------------------
 
-def _store_auto_tags(conn, session_id: str, exchanges: List[Dict]) -> None:
+def _store_auto_tags(conn, session_id: str, exchanges: List[Dict],
+                     commit: bool = True) -> None:
     """Compute and persist auto-tags for a session's exchanges.
 
     Args:
         conn: SQLite connection.
         session_id: Session to tag.
         exchanges: Exchange dicts to derive tags from.
+        commit: If True (default), commit after each tag insertion.
     """
     tags = compute_auto_tags(exchanges)
     for tag in tags:
-        insert_tag(conn, tag, session_id, exchange_idx=None, source='auto')
+        insert_tag(conn, tag, session_id, exchange_idx=None, source='auto',
+                   commit=commit)
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +337,8 @@ def _check_connections(conn, session_id: str) -> Optional[str]:
             # Reset counter, grow interval (decay back-off)
             now = datetime.now(timezone.utc).isoformat()
             new_interval = min(30, interval + 3)
-            update_connection_check(conn, connection['id'], 0, new_interval, now)
+            update_connection_check(conn, connection['id'], 0, new_interval, now,
+                                    commit=False)
         else:
             # Just increment counter, preserve last_checked_at
             update_connection_check(
@@ -331,6 +347,7 @@ def _check_connections(conn, session_id: str) -> Optional[str]:
                 counter,
                 interval,
                 connection['last_checked_at'],
+                commit=False,
             )
 
     if not messages:
@@ -373,10 +390,10 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
     conn = get_connection(db_path)
 
     try:
-        # One-time v1 migration (no-op if legacy file absent)
+        # One-time v1 migration (no-op if legacy file absent or already checked)
         migrate_from_json(conn)
 
-        # Ensure session exists
+        # Ensure session exists (no individual commit — batched below)
         insert_session(
             conn,
             session_id=session_id,
@@ -384,6 +401,7 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
             project_hash=project_hash,
             started_at=now,
             transcript_path=transcript_path,
+            commit=False,
         )
 
         # Read current offset
@@ -406,20 +424,23 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
                 new_exchanges_list = build_new_exchanges(new_messages, start_idx)
 
                 if new_exchanges_list:
-                    insert_exchanges(conn, session_id, new_exchanges_list)
+                    insert_exchanges(conn, session_id, new_exchanges_list, commit=False)
 
                 total_count = existing_count + len(new_exchanges_list)
-                update_session_offset(conn, session_id, new_offset, total_count)
+                update_session_offset(conn, session_id, new_offset, total_count, commit=False)
             else:
-                update_session_offset(conn, session_id, new_offset, existing_count)
+                update_session_offset(conn, session_id, new_offset, existing_count, commit=False)
 
         # Auto-tag and auto-detect only on new exchanges (incremental, not full scan)
         if new_exchanges_list:
-            _store_auto_tags(conn, session_id, new_exchanges_list)
-            auto_detect_highlights(conn, session_id, new_exchanges_list)
+            _store_auto_tags(conn, session_id, new_exchanges_list, commit=False)
+            auto_detect_highlights(conn, session_id, new_exchanges_list, commit=False)
 
-        # Check connections for incoming highlights
+        # Check connections for incoming highlights (updates written with commit=False)
         connection_msg = _check_connections(conn, session_id)
+
+        # Single commit covering all writes above
+        conn.commit()
 
         # Handle /recall
         if user_prompt.strip().lower().startswith('/recall'):
@@ -445,7 +466,8 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
 def main():
     """Read stdin JSON, run the hook, print result to stdout."""
     try:
-        input_data = json.load(sys.stdin)
+        raw = sys.stdin.read(1_000_000)  # 1 MB max
+        input_data = json.loads(raw)
         result = run_hook(input_data)
         print(json.dumps(result), file=sys.stdout)
     except Exception as e:

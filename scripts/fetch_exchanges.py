@@ -14,8 +14,10 @@ Usage:
     python3 fetch_exchanges.py --session <id> search auth --tag mytag
 """
 
+import argparse
 import os
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Optional, Set
 
@@ -152,7 +154,6 @@ def format_cross_project_results(exchanges: List[Dict], keyword: str) -> str:
         return f"*No results found for \"{keyword}\".*"
 
     # Group by project_path then session_id
-    from collections import defaultdict
     by_project: Dict[str, Dict[str, List[Dict]]] = defaultdict(lambda: defaultdict(list))
     for ex in exchanges:
         project = ex.get('project_path', 'unknown')
@@ -238,8 +239,6 @@ def print_usage():
 # ---------------------------------------------------------------------------
 
 def main():
-    import argparse
-
     # Split sys.argv into known args so positional 'rest' accumulates correctly
     parser = _build_arg_parser()
 
@@ -370,19 +369,14 @@ def main():
 
         # Handle "lastN"
         if command.startswith('last'):
-            all_exchanges = get_exchanges(conn, session_id)
-            total = len(all_exchanges)
-            if total == 0:
-                print("*No exchanges found in the current session.*")
-                return
-
-            target_indices = parse_last_n(command, total)
-            if not target_indices:
+            if not command[4:].isdigit():
                 print(f"*Invalid format: {command}. Try 'last5' or 'last10'.*")
                 return
-
-            selected = [ex for ex in all_exchanges if ex['idx'] in target_indices]
-            selected.sort(key=lambda x: x['idx'])
+            n = int(command[4:])
+            selected = get_exchanges(conn, session_id, last_n=n)
+            if not selected:
+                print("*No exchanges found in the current session.*")
+                return
             print(f"*Fetched {len(selected)} exchange(s) ({command}):*\n")
             print(format_exchanges(selected, command))
             return

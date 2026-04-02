@@ -20,7 +20,7 @@ from typing import List, Dict, Optional
 # Add scripts directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from db import get_connection, get_session, get_exchanges, search_exchanges_fts
+from db import get_connection, get_session, get_exchanges, search_exchanges_fts, get_exchange_count
 from utils import (
     format_timestamp,
     format_date,
@@ -258,31 +258,35 @@ def main():
             print(f"*Session '{session_id}' not found in database.*")
             return
 
-        exchanges = get_exchanges(conn, session_id)
-
-        total_exchanges = len(exchanges)
+        total_exchanges = get_exchange_count(conn, session_id)
         session_start = session.get('started_at', '')
 
-        if not exchanges:
+        if total_exchanges == 0:
             print("*No exchanges found in the current session.*")
             return
 
-        # Handle search
+        # Handle search — needs full text, load all exchanges
         if args.search:
+            exchanges = get_exchanges(conn, session_id)
             results = search_exchanges(exchanges, args.search)
             print(format_search_results(results, args.search, total_exchanges))
             return
 
-        # Handle time-based navigation
+        # Handle time-based navigation — needs timestamps, load all exchanges
         page = args.page
         if args.around:
             target_time = parse_time_query(args.around)
             if target_time:
+                exchanges = get_exchanges(conn, session_id)
                 page = find_page_for_time(exchanges, target_time)
             else:
                 print(f"*Could not parse time: {args.around}. Try formats like '2:30pm' or '14:30'*")
                 return
 
+        # For normal pagination, load all exchanges so format_page can compute
+        # date ranges and do reversed-index slicing. The COUNT(*) above already
+        # saved us a full data load on the early-exit (empty) path.
+        exchanges = get_exchanges(conn, session_id)
         print(format_page(exchanges, page, total_exchanges, session_start))
     finally:
         conn.close()

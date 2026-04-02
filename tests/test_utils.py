@@ -200,7 +200,7 @@ class TestSearchInText(unittest.TestCase):
     def test_empty_search(self):
         """Test empty text search."""
         self.assertFalse(search_in_text('', 'test'))
-        self.assertTrue(search_in_text('test', ''))  # empty keyword matches
+        self.assertFalse(search_in_text('test', ''))  # empty keyword returns False
 
 
 class TestFindExchangesByTime(unittest.TestCase):

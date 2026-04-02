@@ -153,7 +153,8 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 def insert_session(conn: sqlite3.Connection, session_id: str, project_path: str,
                    project_hash: str, started_at: str,
-                   transcript_path: Optional[str] = None) -> None:
+                   transcript_path: Optional[str] = None,
+                   commit: bool = True) -> None:
     """Insert a new session (INSERT OR IGNORE)."""
     conn.execute(
         "INSERT OR IGNORE INTO sessions "
@@ -161,7 +162,8 @@ def insert_session(conn: sqlite3.Connection, session_id: str, project_path: str,
         "VALUES (?, ?, ?, ?, ?)",
         (session_id, project_path, project_hash, started_at, transcript_path),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_session(conn: sqlite3.Connection, session_id: str) -> Optional[Dict]:
@@ -182,8 +184,12 @@ def list_sessions(conn: sqlite3.Connection, project_hash: Optional[str] = None,
         sql += " AND project_hash = ?"
         params.append(project_hash)
     if project_path_contains is not None:
-        sql += " AND project_path LIKE ?"
-        params.append('%' + project_path_contains + '%')
+        escaped = (project_path_contains
+                   .replace('\\', '\\\\')
+                   .replace('%', '\\%')
+                   .replace('_', '\\_'))
+        sql += " AND project_path LIKE ? ESCAPE '\\'"
+        params.append('%' + escaped + '%')
     sql += " ORDER BY started_at DESC"
     cur = conn.execute(sql, params)
     return [dict(r) for r in cur.fetchall()]
@@ -199,20 +205,23 @@ def end_session(conn: sqlite3.Connection, session_id: str, ended_at: str) -> Non
 
 
 def update_session_offset(conn: sqlite3.Connection, session_id: str,
-                          byte_offset: int, exchange_count: int) -> None:
+                          byte_offset: int, exchange_count: int,
+                          commit: bool = True) -> None:
     """Update the incremental-read offset and exchange count for a session."""
     conn.execute(
         "UPDATE sessions SET byte_offset = ?, exchange_count = ? WHERE session_id = ?",
         (byte_offset, exchange_count, session_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 # ---------------------------------------------------------------------------
 # Exchange CRUD
 # ---------------------------------------------------------------------------
 
 def insert_exchanges(conn: sqlite3.Connection, session_id: str,
-                     exchanges: List[Dict[str, Any]]) -> None:
+                     exchanges: List[Dict[str, Any]],
+                     commit: bool = True) -> None:
     """Insert a batch of exchanges and sync the FTS5 index.
 
     Args:
@@ -220,6 +229,7 @@ def insert_exchanges(conn: sqlite3.Connection, session_id: str,
         session_id: Parent session ID.
         exchanges: List of dicts with keys: idx, timestamp, preview,
                    user_text, assistant_text.
+        commit: If True (default), commit after insertion.
     """
     new_rowids = []
     for ex in exchanges:
@@ -243,10 +253,11 @@ def insert_exchanges(conn: sqlite3.Connection, session_id: str,
     if new_rowids:
         _insert_fts_rows(conn, new_rowids)
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def _insert_fts_rows(conn, rowids):
+def _insert_fts_rows(conn: sqlite3.Connection, rowids: List[int]) -> None:
     """Insert specific exchange rows into the FTS5 index by rowid.
 
     Does NOT commit — the caller is responsible for committing the transaction.
@@ -265,7 +276,7 @@ def _insert_fts_rows(conn, rowids):
         )
 
 
-def _delete_fts_rows(conn, session_id):
+def _delete_fts_rows(conn: sqlite3.Connection, session_id: str) -> None:
     """Delete FTS5 entries for all exchanges in a session.
 
     Must be called BEFORE deleting the exchanges from the content table,
@@ -282,6 +293,14 @@ def _delete_fts_rows(conn, session_id):
             "VALUES('delete', ?, ?, ?, ?)",
             (row['id'], row['user_text'], row['assistant_text'], row['preview']),
         )
+
+
+def get_exchange_count(conn: sqlite3.Connection, session_id: str) -> int:
+    """Return the number of exchanges for a session via COUNT(*)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    return row[0] if row else 0
 
 
 def get_exchanges(conn: sqlite3.Connection, session_id: str,
@@ -316,14 +335,20 @@ def get_exchanges(conn: sqlite3.Connection, session_id: str,
 # Search
 # ---------------------------------------------------------------------------
 
-def _build_fts_query(query: str) -> str:
+def _build_fts_query(query: str) -> Optional[str]:
     """Build an FTS5 query from user input.
+
+    Returns None if the query is empty after stripping (callers should
+    short-circuit to an empty result list in that case).
 
     If the query is wrapped in double quotes, treat it as an exact phrase match.
     Otherwise, split into individual terms and AND them together so that
     "warp divergence" matches text containing both words in any order/position.
     """
     query = query.strip()
+    if not query:
+        return None
+
     if query.startswith('"') and query.endswith('"') and len(query) > 2:
         # User explicitly wants phrase match — pass through, escape internal quotes
         inner = query[1:-1].replace('"', '""')
@@ -332,7 +357,7 @@ def _build_fts_query(query: str) -> str:
     # Split into terms, quote each individually, AND them together
     terms = query.split()
     if not terms:
-        return '""'
+        return None
     if len(terms) == 1:
         # Single term — quote it for safety
         return '"' + terms[0].replace('"', '""') + '"'
@@ -359,6 +384,8 @@ def search_exchanges_fts(conn: sqlite3.Connection, query: str,
         List of exchange dicts matching the query.
     """
     safe_query = _build_fts_query(query)
+    if safe_query is None:
+        return []
 
     sql = (
         "SELECT e.* FROM exchanges e "
@@ -393,6 +420,8 @@ def search_exchanges_global(conn: sqlite3.Connection, query: str,
         List of dicts — exchange fields plus project_path and session_started.
     """
     safe_query = _build_fts_query(query)
+    if safe_query is None:
+        return []
 
     sql = (
         "SELECT e.*, s.project_path, s.started_at AS session_started "
@@ -518,14 +547,16 @@ def export_session_json(conn: sqlite3.Connection, session_id: str) -> Dict:
 # ---------------------------------------------------------------------------
 
 def insert_tag(conn: sqlite3.Connection, tag: str, session_id: str,
-               exchange_idx: Optional[int] = None, source: str = 'manual') -> None:
+               exchange_idx: Optional[int] = None, source: str = 'manual',
+               commit: bool = True) -> None:
     """Insert a tag. INSERT OR IGNORE for idempotency."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT OR IGNORE INTO tags (tag, session_id, exchange_idx, source, created_at) VALUES (?, ?, ?, ?, ?)",
         (tag, session_id, exchange_idx, source, now)
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_tags(conn: sqlite3.Connection, session_id: Optional[str] = None,
@@ -552,7 +583,8 @@ def get_tags(conn: sqlite3.Connection, session_id: Optional[str] = None,
 
 def insert_highlight(conn: sqlite3.Connection, session_id: str, summary: str,
                      tags: str, source: str,
-                     exchange_idx: Optional[int] = None) -> None:
+                     exchange_idx: Optional[int] = None,
+                     commit: bool = True) -> None:
     """Insert a highlight. INSERT OR IGNORE for dedup."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
@@ -561,7 +593,8 @@ def insert_highlight(conn: sqlite3.Connection, session_id: str, summary: str,
         "VALUES (?, ?, ?, ?, ?, ?)",
         (session_id, summary, exchange_idx, tags, source, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_highlights(conn: sqlite3.Connection, session_id: str,
@@ -634,7 +667,8 @@ def get_connections(conn: sqlite3.Connection,
 
 def update_connection_check(conn: sqlite3.Connection, connection_id: int,
                             check_counter: int, check_interval: int,
-                            last_checked_at: str) -> None:
+                            last_checked_at: str,
+                            commit: bool = True) -> None:
     """Update a connection's check state (counter, interval, last_checked)."""
     conn.execute(
         "UPDATE connections "
@@ -642,7 +676,8 @@ def update_connection_check(conn: sqlite3.Connection, connection_id: int,
         "WHERE id = ?",
         (check_counter, check_interval, last_checked_at, connection_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def delete_connection(conn: sqlite3.Connection, watcher_session: str,

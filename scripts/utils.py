@@ -147,7 +147,7 @@ def format_timestamp(iso_timestamp: str) -> str:
         dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
         local_dt = dt.astimezone()
         return local_dt.strftime("%-I:%M %p").lower()
-    except Exception:
+    except (ValueError, TypeError):
         return ""
 
 
@@ -160,7 +160,7 @@ def format_date(iso_timestamp: str) -> str:
         dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
         local_dt = dt.astimezone()
         return local_dt.strftime("%b %d, %Y at %-I:%M %p")
-    except Exception:
+    except (ValueError, TypeError):
         return "Unknown date"
 
 
@@ -173,7 +173,7 @@ def format_short_date(iso_timestamp: str) -> str:
         dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
         local_dt = dt.astimezone()
         return local_dt.strftime("%b %-d")
-    except Exception:
+    except (ValueError, TypeError):
         return ""
 
 
@@ -184,7 +184,7 @@ def get_date_from_timestamp(iso_timestamp: str) -> Optional[str]:
     try:
         dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
         return dt.date().isoformat()
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 
@@ -261,7 +261,10 @@ def find_exchanges_by_time(
 
 
 def search_in_text(text: str, keyword: str) -> bool:
-    """Check if keyword exists in text (case-insensitive)."""
-    if not text:
+    """Check if keyword exists in text (case-insensitive).
+
+    Returns False if either text or keyword is empty.
+    """
+    if not text or not keyword:
         return False
     return keyword.lower() in text.lower()

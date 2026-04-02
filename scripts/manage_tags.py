@@ -13,6 +13,7 @@ CLI usage:
 
 import argparse
 import os
+import sqlite3
 import sys
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -27,7 +28,7 @@ from db import get_connection, insert_tag, get_tags
 # Core functions
 # ---------------------------------------------------------------------------
 
-def add_tag(conn, tag: str, session_id: str, exchange_idx: int = None) -> None:
+def add_tag(conn: sqlite3.Connection, tag: str, session_id: str, exchange_idx: int = None) -> None:
     """Add a manual tag to a session or a specific exchange.
 
     Delegates to insert_tag() with source='manual'.  For session-level tags
@@ -52,7 +53,7 @@ def add_tag(conn, tag: str, session_id: str, exchange_idx: int = None) -> None:
     insert_tag(conn, tag, session_id, exchange_idx=exchange_idx, source='manual')
 
 
-def list_tags(conn, project_hash: str = None) -> List[Dict]:
+def list_tags(conn: sqlite3.Connection, project_hash: str = None) -> List[Dict]:
     """Return all tags, optionally filtered to a project.
 
     Args:
@@ -65,7 +66,7 @@ def list_tags(conn, project_hash: str = None) -> List[Dict]:
     return get_tags(conn, project_hash=project_hash)
 
 
-def search_by_tag(conn, tag: str) -> List[Dict]:
+def search_by_tag(conn: sqlite3.Connection, tag: str) -> List[Dict]:
     """Find all sessions that carry a given tag, enriched with project info.
 
     Performs a JOIN that db.py's get_tags does not expose.
@@ -88,7 +89,7 @@ def search_by_tag(conn, tag: str) -> List[Dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
-def get_tags_by_session(conn, session_ids: List[str]) -> Dict[str, List[str]]:
+def get_tags_by_session(conn: sqlite3.Connection, session_ids: List[str]) -> Dict[str, List[str]]:
     """Return up to 5 distinct tag strings for each session ID.
 
     Designed for use by manage_sessions to display session summaries.

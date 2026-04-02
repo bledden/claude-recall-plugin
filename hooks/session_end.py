@@ -57,7 +57,8 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
 def main():
     """Read stdin JSON, run the hook, print result to stdout."""
     try:
-        input_data = json.load(sys.stdin)
+        raw = sys.stdin.read(1_000_000)  # 1 MB max
+        input_data = json.loads(raw)
         result = run_hook(input_data)
         print(json.dumps(result), file=sys.stdout)
     except Exception as e:

@@ -12,6 +12,7 @@ CLI usage:
     manage_connections.py config <session> <key> <value>
 """
 
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ from utils import format_timestamp
 # Connect / Disconnect
 # ---------------------------------------------------------------------------
 
-def connect(conn, watcher_session: str, target_session: str, topic: str,
+def connect(conn: sqlite3.Connection, watcher_session: str, target_session: str, topic: str,
             check_mode: str = 'explicit', delivery_mode: str = 'silent') -> str:
     """Connect watcher_session to target_session, watching for highlights about topic.
 
@@ -52,7 +53,7 @@ def connect(conn, watcher_session: str, target_session: str, topic: str,
             f'— watching for highlights about "{topic}"*')
 
 
-def connect_latest(conn, watcher_session: str, project_hash: str, topic: str,
+def connect_latest(conn: sqlite3.Connection, watcher_session: str, project_hash: str, topic: str,
                    check_mode: str = 'explicit', delivery_mode: str = 'silent') -> str:
     """Connect to the most recent active session in the same project.
 
@@ -86,7 +87,7 @@ def connect_latest(conn, watcher_session: str, project_hash: str, topic: str,
                    check_mode=check_mode, delivery_mode=delivery_mode)
 
 
-def disconnect(conn, watcher_session: str, target_session: str) -> str:
+def disconnect(conn: sqlite3.Connection, watcher_session: str, target_session: str) -> str:
     """Remove the connection between watcher and target.
 
     Args:
@@ -153,7 +154,7 @@ def format_inbox(highlights: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def inbox(conn, watcher_session: str) -> str:
+def inbox(conn: sqlite3.Connection, watcher_session: str) -> str:
     """Retrieve and display unchecked highlights for a watcher session.
 
     Fetches all unchecked highlights across the watcher's connections,
@@ -195,7 +196,7 @@ VALID_CONFIG_KEYS = {
 }
 
 
-def config(conn, session_id: str, key: str, value: str) -> str:
+def config(conn: sqlite3.Connection, session_id: str, key: str, value: str) -> str:
     """Set a per-session configuration value.
 
     For 'check_mode' and 'delivery_mode', updates ALL connections where
