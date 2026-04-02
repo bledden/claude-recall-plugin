@@ -1,8 +1,8 @@
-# Claude Recall Plugin
+# Claude Recall Plugin v2.0.0
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that helps you recover conversation context when Claude loses track, with interactive browsing and observability logging.
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events — with cross-session search, tagging, and observability.
 
-> **📋 Marketplace Status:** This plugin has been submitted to the official Claude Code plugins repository and is awaiting approval.
+> **Marketplace Status:** This plugin has been submitted to the official Claude Code plugins repository and is awaiting approval.
 >
 > **PR:** [anthropics/claude-code#16680](https://github.com/anthropics/claude-code/pull/16680)
 >
@@ -17,7 +17,7 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that help
 
 ---
 
-## ⚠️ UPDATE: Claude Code 2.1.x Breaking Change
+## UPDATE: Claude Code 2.1.x Breaking Change
 
 **As of Claude Code 2.1.x, local plugins no longer persist across sessions.** This is an undocumented breaking change from 2.0.x behavior. See [issue #17089](https://github.com/anthropics/claude-code/issues/17089).
 
@@ -131,48 +131,78 @@ source ~/.bashrc
 claude plugins install https://github.com/bledden/claude-recall-plugin
 ```
 
-> **⚠️ Warning:** This method does not reliably persist in Claude Code 2.1.x. The plugin may disappear after restarting. Use Option 1 instead.
+> **Warning:** This method does not reliably persist in Claude Code 2.1.x. The plugin may disappear after restarting. Use Option 1 instead.
+
+---
+
+## Migration from v1.0.1
+
+Migration is automatic. On the first prompt after upgrading to v2.0.0, the hook migrates your existing `index.json` into SQLite and renames the file to `index.json.migrated`. No manual steps required.
+
+**Rollback:** If you need to go back to v1.0.1, rename `index.json.migrated` to `index.json`. v1.0.1 ignores `recall.db`.
+
+---
 
 ## Quick Start
 
-When Claude seems to have lost context, simply run:
+When Claude seems to have lost context, run:
 
 ```
 /recall:recall
 ```
 
 This will:
-1. **Show you a timestamped index** of all exchanges in your session
-2. **Present a menu** asking what you'd like to recall
-3. **Fetch and display** the exchanges you select
-4. **Summarize** where you left off
+1. Show you a timestamped index of all exchanges in your session
+2. Present a menu asking what you'd like to recall
+3. Fetch and display the exchanges you select
+4. Summarize where you left off
 
 ---
 
 ## Full Command Reference
 
-### Interactive Mode
+### Core Commands
 
 ```
-/recall
+/recall                             Interactive menu (index + options)
+/recall last5                       Last 5 exchanges, current session
+/recall around 2pm                  Exchanges around a time
+/recall search <keyword>            Search current session
 ```
 
-Shows the conversation index and presents a menu with options:
-- **Recent (last 5)** - Quick recall of most recent exchanges
-- **Search by keyword** - Find exchanges containing specific text
-- **Jump to time** - Find exchanges around a specific time
+### Cross-Session and Cross-Project Search
 
-### Quick Commands
+```
+/recall search <keyword> --all              Search all sessions, current project
+/recall search <keyword> --global           Search across ALL projects
+/recall search <keyword> --project <name>   Search a specific project by name
+```
 
-Skip the menu by providing arguments directly:
+### Session Management
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/recall last<N>` | Fetch the last N exchanges | `/recall last5`, `/recall last10`, `/recall last20` |
-| `/recall around <time>` | Fetch exchanges around a specific time | `/recall around 2pm`, `/recall around 14:30` |
-| `/recall around "<date> <time>"` | Fetch exchanges around a specific date and time | `/recall around "jan 5 2pm"`, `/recall around "1/5 14:30"` |
-| `/recall search <keyword>` | Search for keyword in full content | `/recall search authentication` |
-| `/recall search "<phrase>"` | Search for exact phrase | `/recall search "PAI dimension"` |
+```
+/recall sessions                    List all sessions (current project)
+/recall sessions --all              List sessions across all projects
+/recall session <id> last10         Browse a specific past session
+```
+
+### Tagging
+
+```
+/recall tag <name>                  Tag the current session
+/recall tag <name> #<exchange>      Tag a specific exchange by number
+/recall tags                        Show all tags
+/recall search --tag <name>         Find sessions and exchanges by tag
+```
+
+### Maintenance
+
+```
+/recall stats                               Storage statistics
+/recall prune --session <id>                Delete a specific session
+/recall prune --before 2026-01-01           Delete all sessions before a date
+/recall export --session <id> --json        Export a session to JSON
+```
 
 ### Time Format Support
 
@@ -190,72 +220,77 @@ The plugin understands various time formats:
 
 ## Features
 
-### 1. Timestamped Conversation Index
+### 1. /clear Survival
 
-Every exchange is indexed with its timestamp, allowing you to:
-- Browse your conversation history chronologically
-- See exactly when each exchange happened
-- Navigate through paginated results (20 exchanges per page)
+Context is persisted to SQLite before `/clear` executes. After clearing, your full exchange history is still searchable and retrievable. Clearing the context window no longer means losing the record of what happened.
 
-**Example output:**
+### 2. Cross-Session Search
+
+Search across all sessions in a project with `--all`, or across every project you've worked in with `--global`. Results include session ID, project, timestamp, and a content preview.
+
+```
+/recall search "auth flow" --all
+/recall search "triton kernel" --global
+```
+
+### 3. PostCompact Nudge
+
+After Claude Code compacts the conversation, the plugin automatically injects a brief context-recovery hint: a prompt reminding Claude to re-anchor on what was happening. No manual `/recall` needed after compaction.
+
+### 4. Auto-Tagging
+
+Technical terms are extracted automatically from each exchange — function names, file paths, identifiers, command names. These feed into FTS5 search so you can find exchanges without remembering the exact wording.
+
+### 5. Manual Tagging
+
+Apply your own tags to sessions or individual exchanges for cross-project discovery:
+
+```
+/recall tag auth-refactor
+/recall tag metal-backend #42
+```
+
+Tags are queryable across all sessions and projects.
+
+### 6. Concurrent Session Safety
+
+Multiple Claude sessions in the same project write to the same database without conflicts. SQLite WAL mode allows concurrent reads and serializes writes safely.
+
+### 7. SQLite Storage
+
+All context is stored in a single SQLite database (`recall.db`) with FTS5 for full-text search. No JSON files, no external dependencies beyond Python's built-in `sqlite3` module.
+
+### 8. Timestamped Conversation Index
+
+Every exchange is indexed with its timestamp:
+
 ```
 Session started: Jan 5, 2026 at 9:00 AM (Jan 5 - Jan 7)
 Total exchanges: 117
 
 Showing page 1 of 6 (most recent first):
 
-**Jan 7:**
+Jan 7:
 #117 [5:13 pm] "root@dendritic-distillation:~/dendritic# ls..."
 #116 [2:49 pm] "Yes, give me the command to kick that off"
 
-**Jan 6:**
+Jan 6:
 #115 [1:33 pm] "It looks like the experiment is complete..."
 ```
 
-### 2. Full-Content Search
+### 9. Full-Content Search
 
-Search looks in **both user prompts AND assistant responses**, not just the preview text.
+Search looks in both user prompts and assistant responses, not just preview text.
 
 ```
 /recall search dimension
 ```
 
-This finds exchanges where:
-- You mentioned "dimension" in your prompt
-- Claude mentioned "dimension" in the response
-- The word appears anywhere in the full content
+Results show up to 10 most recent matches, grouped by date.
 
-**Search results show up to 10 most recent matches**, grouped by date.
+### 10. Observability Logging
 
-### 3. Multi-Day Session Support
-
-For sessions spanning multiple days:
-
-- **Index groups exchanges by date** with headers
-- **Time searches can specify a date** for precision
-- **Date range shown in header** (e.g., "Jan 5 - Jan 7")
-
-```
-# Find 2pm on any day (closest match)
-/recall around 2pm
-
-# Find 2pm specifically on Jan 5
-/recall around "jan 5 2pm"
-```
-
-### 4. Flexible Time Navigation
-
-Jump to any point in the conversation by time:
-
-```
-/recall around 2pm          # Finds ~5 exchanges around 2pm
-/recall around "jan 5 2pm"  # Finds ~5 exchanges around 2pm on Jan 5
-/recall around yesterday 3pm # Finds exchanges around 3pm yesterday
-```
-
-### 5. Observability Logging
-
-Every `/recall` invocation is logged for analysis:
+Every `/recall` invocation is logged:
 
 ```
 ~/.claude/recall-events.log
@@ -266,20 +301,7 @@ Log format:
 2026-01-05T16:45:00+00:00 | session=abc123 | exchanges=72 | CONTEXT_RECALL_TRIGGERED
 ```
 
-Use this to:
-- Track how often context is lost
-- Identify problematic sessions
-- Analyze patterns in context loss
-
-### 6. Incremental Updates
-
-The plugin efficiently updates the index:
-- Only processes **new messages** since last update
-- Uses byte offset to skip already-indexed content
-- Stores full content in index for instant search
-- No redundant transcript parsing
-
-### 7. Pagination
+### 11. Pagination
 
 Long sessions are paginated (20 exchanges per page):
 
@@ -295,43 +317,90 @@ Navigation:
 
 ## Usage Examples
 
-### Scenario: Claude lost context mid-task
+### Claude lost context mid-task
 
 ```
 /recall last5
 ```
-Fetches the 5 most recent exchanges so Claude can pick up where you left off.
 
-### Scenario: Find a specific discussion from earlier
+### Find a specific discussion from earlier
 
 ```
 /recall search "API endpoint"
 ```
-Searches all exchanges for mentions of "API endpoint" in either your prompts or Claude's responses.
 
-### Scenario: Return to work from yesterday afternoon
+### Find something across all sessions in this project
+
+```
+/recall search "gradient checkpointing" --all
+```
+
+### Find a concept you worked on in a different project
+
+```
+/recall search "WAL mode" --global
+```
+
+### Return to work from yesterday afternoon
 
 ```
 /recall around "yesterday 3pm"
 ```
-Fetches exchanges from around 3pm yesterday.
 
-### Scenario: Browse the full conversation
+### Tag a session for later reference
 
 ```
-/recall
+/recall tag metal-backend
 ```
-Then use the interactive menu to navigate pages, search, or jump to specific times.
+
+### Browse a past session
+
+```
+/recall sessions
+/recall session abc123 last10
+```
+
+### Clean up old sessions
+
+```
+/recall prune --before 2026-01-01
+```
 
 ---
 
 ## How It Works
 
-1. **Hook runs on every prompt** - A `UserPromptSubmit` hook incrementally updates the index
-2. **Index stored locally** - At `~/.claude/context-recall/index.json`
-3. **Full content cached** - Enables instant full-text search without re-parsing
-4. **Byte offset tracking** - Only new transcript data is processed
-5. **Observability logging** - Every recall event is logged for analysis
+### Hooks
+
+Three hooks are registered:
+
+- **UserPromptSubmit** — Incrementally indexes each exchange into SQLite on every prompt. Handles `/clear` survival by committing before the clear executes.
+- **PostCompact** — After compaction, injects a context-recovery nudge so Claude re-anchors on the session state.
+- **SessionEnd** — Finalizes the session record in the database.
+
+### Storage
+
+SQLite with FTS5 for full-text search and WAL mode for concurrent session safety. All data lives in a single file — no external services, no dependencies beyond Python's standard library.
+
+### Tagging
+
+A hybrid approach: auto-tags are extracted from exchange content at index time; manual tags are applied via `/recall tag`. Both are searchable via FTS5.
+
+---
+
+## Data Storage
+
+```
+~/.claude/context-recall/recall.db     Single SQLite database (WAL mode, FTS5)
+~/.claude/recall-events.log            Recall event log (unchanged from v1)
+```
+
+The database contains three main tables:
+- `sessions` — one row per session, with project, timestamps, and metadata
+- `exchanges` — one row per exchange, with full user/assistant text
+- `tags` — session and exchange-level tags
+
+FTS5 virtual tables index exchange content for fast keyword search across any scope.
 
 ---
 
@@ -342,7 +411,7 @@ Then use the interactive menu to navigate pages, search, or jump to specific tim
 tail -20 ~/.claude/recall-events.log
 
 # Count recalls per day
-cut -d'T' -f1 ~/.claude/recall-events.log | uniq -c
+cut -dT -f1 ~/.claude/recall-events.log | uniq -c
 
 # Find sessions with frequent recalls
 grep -oP 'session=\K[^ ]+' ~/.claude/recall-events.log | sort | uniq -c | sort -rn
@@ -350,44 +419,6 @@ grep -oP 'session=\K[^ ]+' ~/.claude/recall-events.log | sort | uniq -c | sort -
 # Count total recalls
 wc -l ~/.claude/recall-events.log
 ```
-
----
-
-## Data Storage
-
-Located at `~/.claude/context-recall/`:
-
-| File | Purpose |
-|------|---------|
-| `index.json` | Current session's timestamped index with full content |
-
-### Index Structure
-
-```json
-{
-  "session_id": "abc123",
-  "session_start": "2026-01-05T09:00:00Z",
-  "updated_at": "2026-01-07T17:30:00Z",
-  "total_exchanges": 117,
-  "transcript_path": "/path/to/transcript.jsonl",
-  "_byte_offset": 524288,
-  "exchanges": [
-    {
-      "idx": 1,
-      "preview": "Hello, please get caught up...",
-      "timestamp": "2026-01-05T09:00:00Z",
-      "user_text": "Full user message content...",
-      "assistant_text": "Full assistant response..."
-    }
-  ]
-}
-```
-
-### Session Behavior
-
-- **Current session**: `index.json` updates incrementally on every prompt
-- **New session**: Previous index is overwritten when a new session starts
-- **No size limit**: Index grows with conversation (~2KB per exchange)
 
 ---
 
@@ -400,18 +431,24 @@ claude-recall-plugin/
 ├── commands/
 │   └── recall.md                # The /recall command definition
 ├── hooks/
-│   ├── hooks.json               # Hook configuration
-│   └── save_context_snapshot.py # Builds index incrementally
+│   ├── hooks.json               # Hook configuration (UserPromptSubmit, PostCompact, SessionEnd)
+│   └── save_context_snapshot.py # Incremental indexer + migration
 ├── scripts/
 │   ├── utils.py                 # Shared utilities
+│   ├── db.py                    # SQLite layer (FTS5, WAL, migrations)
 │   ├── show_index.py            # Paginated index display
 │   ├── fetch_exchanges.py       # Fetch exchanges by query
-│   └── extract_context.py       # Legacy quick recall
+│   ├── search.py                # Cross-session/project search
+│   ├── sessions.py              # Session list, browse, prune, export
+│   └── tags.py                  # Tag management
 └── tests/
-    ├── test_utils.py            # Utils module tests
-    ├── test_fetch_exchanges.py  # Fetch tests
-    ├── test_show_index.py       # Index display tests
-    └── test_save_context_snapshot.py # Hook tests
+    ├── test_utils.py
+    ├── test_fetch_exchanges.py
+    ├── test_show_index.py
+    ├── test_save_context_snapshot.py
+    ├── test_db.py
+    ├── test_search.py
+    └── test_tags.py
 ```
 
 ---
@@ -436,9 +473,9 @@ python3 -m unittest discover -v tests/
 
 ## Known Limitations
 
-- **Claude Cowork requires zip upload** - Cowork does not yet support marketplace installation; upload the plugin zip file manually via the Plugins sidebar
-- **Single session tracking** - Only the current session is indexed; previous session data is overwritten when a new session starts
-- **VSCode extension requires marketplace** - Due to a [breaking change in 2.1.x](https://github.com/anthropics/claude-code/issues/17089), the VSCode extension requires the marketplace installation method
+- **Claude Cowork requires zip upload** — Cowork does not yet support marketplace installation; upload the plugin zip file manually via the Plugins sidebar
+- **VSCode extension requires marketplace** — Due to a [breaking change in 2.1.x](https://github.com/anthropics/claude-code/issues/17089), the VSCode extension requires the marketplace installation method
+- **No semantic/embedding search** — Search is keyword-based via SQLite FTS5; embedding/vector search is not supported yet
 
 ---
 
@@ -453,9 +490,24 @@ claude plugin marketplace remove recall-local
 **If using shell alias:**
 Remove the alias line from your `~/.zshrc` or `~/.bashrc`, then run `source ~/.zshrc` or `source ~/.bashrc`.
 
+**Removing stored data:**
+```bash
+rm -rf ~/.claude/context-recall/
+```
+
 ---
 
 ## Changelog
+
+### 2.0.0 (April 2026)
+- SQLite storage (`recall.db`) replaces JSON index files — FTS5 for search, WAL for concurrent access
+- `/clear` survival — context persists across clear commands
+- Cross-session search (`--all`) and cross-project search (`--global`, `--project`)
+- PostCompact hook — automatic context recovery nudge after compaction
+- Hybrid auto/manual tagging — automatic technical term extraction plus user-applied tags
+- Session management commands: `sessions`, `session <id>`, `stats`, `prune`, `export`
+- Concurrent session safety via WAL mode
+- Automatic migration from v1.0.1 on first run
 
 ### 1.0.1 (January 2026)
 - Added Claude Cowork support (zip upload via Plugins sidebar)
