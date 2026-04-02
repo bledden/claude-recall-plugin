@@ -261,31 +261,15 @@ class TestAutoDetectConservative(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_short_generic_text_with_signals_does_not_trigger(self):
-        """A short response that happens to contain two signal words should not trigger.
+        """A short response with signal words should NOT trigger due to min word count guard.
 
         'try using this, the fix is simple' contains both 'try using' and 'the fix is'
-        but is far too short and generic to represent a real captured insight.
+        but is far too short to represent a real captured insight.
         """
         short_generic = "Sure, try using this approach. The fix is simple."
-        # This text has 2 signals, which meets the threshold — the threshold alone
-        # is not sufficient to guarantee quality. This test documents the current
-        # behavior so any future changes to the heuristic are explicit.
-        #
-        # Count the signals in this text to understand what we're testing:
-        count = detect_solution_signals(short_generic)
-        # If threshold is met, the current heuristic WILL create a highlight.
-        # The test verifies the actual behavior without asserting a policy that
-        # isn't implemented yet — this is a documentation test for edge cases.
         exchanges = [_make_exchange(0, short_generic)]
         result = auto_detect_highlights(self.conn, self.session_id, exchanges)
-        # Document: a 2-signal hit on short text DOES trigger under current heuristic.
-        # If a future minimum-length guard is added, update this test.
-        if count >= SOLUTION_SIGNAL_THRESHOLD:
-            self.assertEqual(len(result), 1,
-                             "Short text with 2+ signals currently triggers — "
-                             "add a min-word-count guard to prevent this false positive.")
-        else:
-            self.assertEqual(len(result), 0)
+        self.assertEqual(len(result), 0, "Short text should be rejected by min word count guard")
 
     def test_single_signal_normal_conversation_does_not_trigger(self):
         """Normal conversational response with one signal doesn't create a highlight."""

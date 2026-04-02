@@ -28,6 +28,7 @@ SOLUTION_SIGNALS = [
 ]
 SOLUTION_SIGNAL_THRESHOLD = 2
 HIGHLIGHT_SUMMARY_MAX_CHARS = 100
+MIN_WORD_COUNT_FOR_AUTO = 25  # Reject short/generic responses to avoid false positives
 
 # ---------------------------------------------------------------------------
 # Explicit highlight creation
@@ -128,6 +129,11 @@ def auto_detect_highlights(conn, session_id: str,
     for exchange in new_exchanges:
         assistant_text = exchange.get('assistant_text') or ''
         if not assistant_text:
+            continue
+
+        # Skip short responses — they're unlikely to contain real findings
+        word_count = len(assistant_text.split())
+        if word_count < MIN_WORD_COUNT_FOR_AUTO:
             continue
 
         signal_count = detect_solution_signals(assistant_text)
