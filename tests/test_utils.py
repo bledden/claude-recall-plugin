@@ -21,7 +21,6 @@ from utils import (
     get_date_from_timestamp,
     search_in_text,
     find_exchanges_by_time,
-    build_exchanges_from_messages,
 )
 
 
@@ -222,32 +221,6 @@ class TestFindExchangesByTime(unittest.TestCase):
         """Test with empty exchanges list."""
         result = find_exchanges_by_time([], datetime.now())
         self.assertEqual(result, [])
-
-
-class TestBuildExchangesFromMessages(unittest.TestCase):
-    """Tests for build_exchanges_from_messages function."""
-
-    def test_build_exchanges(self):
-        """Test building exchanges from messages."""
-        messages = [
-            {'role': 'user', 'text': 'Hello', 'timestamp': '2026-01-05T10:00:00Z'},
-            {'role': 'assistant', 'text': 'Hi there', 'timestamp': '2026-01-05T10:00:01Z'},
-            {'role': 'user', 'text': 'How are you?', 'timestamp': '2026-01-05T10:01:00Z'},
-            {'role': 'assistant', 'text': 'I am well', 'timestamp': '2026-01-05T10:01:01Z'},
-        ]
-        exchanges = build_exchanges_from_messages(messages)
-        self.assertEqual(len(exchanges), 2)
-        self.assertEqual(exchanges[0]['idx'], 1)
-        self.assertEqual(exchanges[0]['user_text'], 'Hello')
-        self.assertEqual(exchanges[1]['idx'], 2)
-
-    def test_incomplete_exchange(self):
-        """Test handling incomplete exchange (user without assistant)."""
-        messages = [
-            {'role': 'user', 'text': 'Hello', 'timestamp': '2026-01-05T10:00:00Z'},
-        ]
-        exchanges = build_exchanges_from_messages(messages)
-        self.assertEqual(len(exchanges), 0)
 
 
 if __name__ == '__main__':

@@ -5,8 +5,6 @@ This module contains common functions used across multiple scripts
 to avoid code duplication.
 """
 
-import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +19,6 @@ PAGE_SIZE = 20
 AROUND_TIME_WINDOW = 5
 
 # File paths
-INDEX_DIR = Path.home() / '.claude' / 'context-recall'
-INDEX_FILE = INDEX_DIR / 'index.json'
 LOG_FILE = Path.home() / '.claude' / 'recall-events.log'
 
 
@@ -190,102 +186,6 @@ def get_date_from_timestamp(iso_timestamp: str) -> Optional[str]:
         return dt.date().isoformat()
     except Exception:
         return None
-
-
-def load_index() -> Optional[Dict]:
-    """Load the conversation index from disk."""
-    if not INDEX_FILE.exists():
-        return None
-
-    try:
-        with open(INDEX_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def save_index(index_data: Dict) -> bool:
-    """Save the conversation index to disk."""
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with open(INDEX_FILE, 'w', encoding='utf-8') as f:
-            json.dump(index_data, f, indent=2)
-        return True
-    except Exception:
-        return False
-
-
-def parse_transcript_messages(transcript_path: str) -> List[Dict[str, Any]]:
-    """Parse transcript file and extract messages with timestamps.
-
-    Returns list of dicts with keys: role, text, timestamp
-    """
-    messages = []
-
-    if not transcript_path or not os.path.exists(transcript_path):
-        return messages
-
-    try:
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    role = entry.get('type', '') or entry.get('role', '')
-                    if role not in ('user', 'assistant'):
-                        message_obj = entry.get('message', {})
-                        role = message_obj.get('role', '')
-
-                    if role in ('user', 'assistant'):
-                        message_obj = entry.get('message', {})
-                        text = extract_text_content(message_obj)
-                        timestamp = entry.get('timestamp', '')
-
-                        if text:
-                            messages.append({
-                                'role': role,
-                                'text': text,
-                                'timestamp': timestamp
-                            })
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        pass
-
-    return messages
-
-
-def build_exchanges_from_messages(messages: List[Dict[str, Any]]) -> List[Dict]:
-    """Build list of exchanges from parsed messages.
-
-    Returns list of dicts with keys: idx, user_text, assistant_text, timestamp
-    """
-    exchanges = []
-    i = 0
-    exchange_idx = 1
-
-    while i < len(messages):
-        if messages[i]['role'] == 'user':
-            user_msg = messages[i]
-            if i + 1 < len(messages) and messages[i + 1]['role'] == 'assistant':
-                assistant_msg = messages[i + 1]
-                exchanges.append({
-                    'idx': exchange_idx,
-                    'user_text': user_msg['text'],
-                    'assistant_text': assistant_msg['text'],
-                    'timestamp': user_msg.get('timestamp', '')
-                })
-                exchange_idx += 1
-                i += 2
-            else:
-                i += 1
-        else:
-            i += 1
-
-    return exchanges
 
 
 def find_exchanges_by_time(
