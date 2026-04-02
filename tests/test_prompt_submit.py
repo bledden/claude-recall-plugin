@@ -249,11 +249,11 @@ class TestRunHook(unittest.TestCase):
         ])
         run_hook(self._base_input(session_id=watcher_id), db_path=self.db_path)
 
-        # Set up connection with check_mode='auto' (decay) and delivery_mode='inject'
+        # Set up connection with check_mode='decay' and delivery_mode='inject'
         # and check_interval=1 so the first run triggers
         conn = get_connection(self.db_path)
         insert_connection(conn, watcher_id, target_id, 'kernel work',
-                          check_mode='auto', delivery_mode='inject')
+                          check_mode='decay', delivery_mode='inject')
         # Set interval to 1 so the very next hook call fires
         conn.execute(
             "UPDATE connections SET check_interval = 1 WHERE watcher_session = ?",

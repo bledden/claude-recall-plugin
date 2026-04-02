@@ -289,7 +289,7 @@ def _check_connections(conn, session_id: str) -> Optional[str]:
 
     messages = []
     for connection in connections:
-        if connection['check_mode'] == 'explicit':
+        if connection['check_mode'] != 'decay':
             continue  # User checks manually via /recall inbox
 
         # Decay mode: increment counter

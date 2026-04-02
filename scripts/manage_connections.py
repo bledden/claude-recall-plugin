@@ -12,7 +12,6 @@ CLI usage:
     manage_connections.py config <session> <key> <value>
 """
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
