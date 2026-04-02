@@ -3,6 +3,11 @@
   "version": "2.2.0",
   "description": "Cross-session, cross-project conversation recall with SQLite storage, auto-tagging, compaction recovery, highlight sharing, and proactive recall assistant skill",
   "author": {
-    "name": "bledden"
-  }
+    "name": "bledden",
+    "url": "https://github.com/bledden"
+  },
+  "homepage": "https://github.com/bledden/claude-recall-plugin",
+  "repository": "https://github.com/bledden/claude-recall-plugin",
+  "license": "MIT",
+  "keywords": ["recall", "context", "memory", "search", "session", "productivity"]
 }

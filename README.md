@@ -587,6 +587,32 @@ python3 -m pytest tests/ tests/stress_test_*.py -v
 
 ---
 
+## Privacy and Data Handling
+
+All data is stored **locally on your machine** in `~/.claude/context-recall/`. The plugin makes no network requests, includes no telemetry, and shares no data with any external service.
+
+For full details on what data is stored, how to delete it, and your control options, see [PRIVACY.md](PRIVACY.md).
+
+---
+
+## Security
+
+### Reporting Vulnerabilities
+
+To report a security vulnerability, please open an issue at [github.com/bledden/claude-recall-plugin/issues](https://github.com/bledden/claude-recall-plugin/issues) or contact the author directly via GitHub.
+
+### Security Practices
+
+- All SQL queries use parameterized statements
+- No dynamic code execution of any kind
+- No external network requests or downloads
+- Error messages do not leak file paths or internal state
+- Transcript reads are bounded (10MB / 5000 messages per invocation)
+- Database directory created with restricted permissions (0o700)
+- Hook stdin reads bounded to 1MB
+
+---
+
 ## Known Limitations
 
 - **Claude Cowork requires zip upload** — Cowork does not yet support marketplace installation; upload the plugin zip file manually via the Plugins sidebar
@@ -616,56 +642,7 @@ rm -rf ~/.claude/context-recall/
 
 ## Changelog
 
-### 2.2.0 (April 2026)
-- Recall assistant skill: opt-in SKILL.md for proactive context recovery, highlight suggestions, and natural language session linking
-- New config keys: `skill_enabled`, `detection_signals`, `auto_run_highlight`
-- Performance: batch commits (10-15 fsyncs → 1 per prompt), schema init guard, PRAGMA synchronous=NORMAL
-- Performance: incremental auto-tagging (O(new exchanges) instead of O(all exchanges))
-- Security: error messages no longer leak raw exceptions, transcript reads capped at 10MB
-- Security: LIKE wildcards escaped, stdin reads bounded, DB directory permissions restricted
-- Quality: full type annotations, narrow exception handling, empty query guards
-- 298 tests total (226 unit/integration + 72 stress)
-
-### 2.1.0 (April 2026)
-- Cross-session context sharing via highlights and connections
-- Explicit highlight creation: Claude proactively runs `/recall highlight "summary"` for shareable findings
-- Opt-in auto-detect highlights: conservative heuristic (2+ solution signals, 25+ words) creates highlights automatically
-- `/recall connect <session-id> "topic"` and `/recall connect --latest "topic"` to watch sessions
-- `/recall disconnect` to stop watching a session
-- `/recall inbox` to view unchecked highlights from connected sessions
-- Configurable check frequency: `explicit` (default, manual inbox check only) or `decay` (polling: starts every 7th prompt, grows by 3 each check, caps at every 30th)
-- Configurable delivery: `silent` (default, queue for inbox) or `inject` (system message auto-injection)
-- `/recall config` command for `check_mode`, `delivery_mode`, and `auto_highlight` settings
-- FTS5 multi-word search now uses AND logic — both terms must appear anywhere in the exchange (previously matched as exact phrase)
-- Users can still force exact phrase matching with explicit quotes: `search "the fix is"`
-- Bug fixes: `prune_session` FK violation on sessions with highlights; auto-detect summary deduplication collision
-
-### 2.0.0 (April 2026)
-- SQLite storage (`recall.db`) replaces JSON index files — FTS5 for search, WAL for concurrent access
-- `/clear` survival — context persists across clear commands
-- Cross-session search (`--all`) and cross-project search (`--global`, `--project`)
-- PostCompact hook — automatic context recovery nudge after compaction
-- Hybrid auto/manual tagging — automatic technical term extraction plus user-applied tags
-- Session management commands: `sessions`, `session <id>`, `stats`, `prune`, `export`
-- Concurrent session safety via WAL mode
-- Automatic migration from v1.0.1 on first run
-
-### 1.0.1 (January 2026)
-- Added Claude Cowork support (zip upload via Plugins sidebar)
-- Updated installation docs for Claude Code 2.1.x marketplace requirement
-- Added pre-built marketplace for easier Claude Code installation
-- Fixed Python 3.15 deprecation warning in date parsing
-- Fixed all test imports for refactored module structure
-
-### 1.0.0 (January 2026)
-- Initial release
-- Interactive `/recall` command with menu
-- Quick commands: `last5`, `last10`, `search`, `around`
-- Full-content search across user prompts and assistant responses
-- Multi-day session support with date grouping
-- Incremental indexing with byte offset tracking
-- Observability logging to `~/.claude/recall-events.log`
-- 91 unit tests
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ---
 
