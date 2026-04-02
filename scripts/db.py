@@ -128,7 +128,7 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     # Ensure parent directory exists
     db_dir = os.path.dirname(db_path)
     if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+        os.makedirs(db_dir, mode=0o700, exist_ok=True)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

@@ -142,8 +142,9 @@ def main():
         result = run_hook(input_data)
         print(json.dumps(result), file=sys.stdout)
     except Exception as e:
+        print(f"[context-recall] PostCompact error: {e}", file=sys.stderr)
         error_output = {
-            "systemMessage": f"[context-recall] PostCompact hook error (non-blocking): {str(e)}"
+            "systemMessage": "[context-recall] PostCompact hook encountered an error. Check logs for details."
         }
         print(json.dumps(error_output), file=sys.stdout)
     finally:

@@ -55,6 +55,9 @@ def parse_transcript_from_offset(
         Tuple of (messages, new_byte_offset) where each message is a dict
         with keys: role, text, timestamp.
     """
+    MAX_BYTES_PER_READ = 10 * 1024 * 1024  # 10 MB cap per invocation
+    MAX_MESSAGES_PER_READ = 5000
+
     messages: List[Dict] = []
     new_offset = byte_offset
 
@@ -66,7 +69,11 @@ def parse_transcript_from_offset(
             if byte_offset > 0:
                 f.seek(byte_offset)
 
+            bytes_read = 0
             for line_bytes in f:
+                bytes_read += len(line_bytes)
+                if bytes_read > MAX_BYTES_PER_READ or len(messages) >= MAX_MESSAGES_PER_READ:
+                    break
                 try:
                     line = line_bytes.decode('utf-8').strip()
                 except UnicodeDecodeError:
@@ -442,8 +449,9 @@ def main():
         result = run_hook(input_data)
         print(json.dumps(result), file=sys.stdout)
     except Exception as e:
+        print(f"[context-recall] Hook error: {e}", file=sys.stderr)
         error_output = {
-            "systemMessage": f"[context-recall] Hook error (non-blocking): {str(e)}"
+            "systemMessage": "[context-recall] Hook encountered an error. Check logs for details."
         }
         print(json.dumps(error_output), file=sys.stdout)
     finally:
