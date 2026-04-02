@@ -237,13 +237,13 @@ class TestConfig(unittest.TestCase):
 
     def test_config_sets_check_mode_on_all_connections(self):
         """config() with check_mode updates all connections for the session."""
-        result = config(self.conn, self.session, 'check_mode', 'auto')
+        result = config(self.conn, self.session, 'check_mode', 'decay')
         self.assertIn('check_mode', result)
-        self.assertIn('auto', result)
+        self.assertIn('decay', result)
 
         connections = get_connections(self.conn, self.session)
         for c in connections:
-            self.assertEqual(c['check_mode'], 'auto')
+            self.assertEqual(c['check_mode'], 'decay')
 
     def test_config_sets_auto_highlight_in_session_config(self):
         """config() with auto_highlight writes to session metadata."""

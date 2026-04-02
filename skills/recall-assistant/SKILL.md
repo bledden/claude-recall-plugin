@@ -153,6 +153,8 @@ When suggesting recall commands, use these:
 
 ### Session Management
 - `/recall sessions` — list all sessions
+- `/recall sessions --all` — list sessions across all projects
+- `/recall sessions --project <name>` — list sessions in specific project
 - `/recall session <id> last10` — browse a past session
 - `/recall stats` — storage statistics
 

@@ -102,33 +102,3 @@ Run the appropriate script based on `$ARGUMENTS` as described in Step 1.
 
 Then summarize the fetched content and ask user to confirm understanding.
 
----
-
-## Proactive Highlighting
-
-When you produce a finding, solution, or technique that would be valuable
-to other sessions working on related problems, proactively run:
-
-`/recall highlight "one-line summary of the finding"`
-
-Examples of highlight-worthy findings:
-- A bug fix or workaround that others might hit
-- A performance technique that transfers across kernels
-- An architectural insight about the codebase
-- A configuration or flag that solved a problem
-
-Do not highlight routine answers, clarifications, or exploratory discussion.
-Only highlight concrete, transferable findings.
-
----
-
-## Natural Language Session Linking
-
-When the user mentions another session or asks you to watch, monitor, or track
-another session's work, translate that into a /recall connect command.
-
-For example:
-- "keep an eye on session abc123, they're doing kernel work"
-  → Run: `/recall connect abc123 "kernel work"`
-- "watch the other session for anything about memory coalescing"
-  → Ask for the session ID, then run /recall connect

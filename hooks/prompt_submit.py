@@ -62,17 +62,21 @@ def parse_transcript_from_offset(
         return messages, new_offset
 
     try:
-        with open(transcript_path, 'r', encoding='utf-8') as f:
+        with open(transcript_path, 'rb') as f:
             if byte_offset > 0:
                 f.seek(byte_offset)
 
-            for line in f:
-                line_stripped = line.strip()
-                if not line_stripped:
+            for line_bytes in f:
+                try:
+                    line = line_bytes.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    continue
+
+                if not line:
                     continue
 
                 try:
-                    entry = json.loads(line_stripped)
+                    entry = json.loads(line)
                     role = entry.get('type', '') or entry.get('role', '')
                     if role not in ('user', 'assistant'):
                         message_obj = entry.get('message', {})
@@ -94,8 +98,8 @@ def parse_transcript_from_offset(
 
             new_offset = f.tell()
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[context-recall] Transcript parse error: {e}", file=sys.stderr)
 
     return messages, new_offset
 
@@ -410,12 +414,10 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
                     session['exchange_count'] if session else 0,
                 )
 
-        # Auto-tag the full session
+        # Auto-tag and auto-detect highlights only when there are new exchanges
         all_exchanges = get_exchanges(conn, session_id)
-        _store_auto_tags(conn, session_id, all_exchanges)
-
-        # Auto-detect highlights (if enabled)
         if new_exchanges_list:
+            _store_auto_tags(conn, session_id, all_exchanges)
             auto_detect_highlights(conn, session_id, new_exchanges_list)
 
         # Check connections for incoming highlights

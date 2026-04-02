@@ -175,8 +175,12 @@ def main() -> None:
     conn = get_connection()
     try:
         if args.command == 'list':
-            project_hash = getattr(args, 'project_hash', None)
-            project_path_contains = getattr(args, 'project', None)
+            if args.list_all:
+                project_hash = None
+                project_path_contains = None
+            else:
+                project_hash = getattr(args, 'project_hash', None)
+                project_path_contains = getattr(args, 'project', None)
             sessions = list_sessions(
                 conn,
                 project_hash=project_hash,

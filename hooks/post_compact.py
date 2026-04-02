@@ -57,7 +57,10 @@ def build_nudge_message(
 
     lines.append("Use /recall to recover full conversation context.")
 
-    return "\n".join(lines)
+    result = '\n'.join(lines)
+    if len(result) > NUDGE_MAX_CHARS:
+        result = result[:NUDGE_MAX_CHARS - 20] + '\n[...truncated...]'
+    return result
 
 
 # ---------------------------------------------------------------------------

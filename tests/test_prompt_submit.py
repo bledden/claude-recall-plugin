@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from prompt_submit import build_new_exchanges, run_hook
+from prompt_submit import build_new_exchanges, run_hook, parse_transcript_from_offset
 from db import (get_connection, get_session, get_exchanges,
                 insert_connection, insert_highlight, set_session_config)
 
@@ -325,6 +325,123 @@ class TestRunHook(unittest.TestCase):
 
         self.assertGreater(len(highlights), 0,
                            "Expected at least one auto-detected highlight")
+
+
+# ---------------------------------------------------------------------------
+# TestParseTranscriptFromOffset
+# ---------------------------------------------------------------------------
+
+class TestParseTranscriptFromOffset(unittest.TestCase):
+    """Tests for parse_transcript_from_offset — binary mode, UTF-8 safety."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _path(self, name='transcript.jsonl'):
+        return str(Path(self.temp_dir) / name)
+
+    def test_nonexistent_file_returns_empty(self):
+        """Non-existent file returns empty messages and offset 0."""
+        messages, offset = parse_transcript_from_offset('/no/such/file.jsonl', 0)
+        self.assertEqual(messages, [])
+        self.assertEqual(offset, 0)
+
+    def test_empty_file_returns_empty(self):
+        """Empty transcript file returns no messages and offset at EOF."""
+        path = self._path()
+        with open(path, 'wb') as f:
+            pass  # empty file
+        messages, offset = parse_transcript_from_offset(path, 0)
+        self.assertEqual(messages, [])
+        self.assertEqual(offset, 0)
+
+    def test_malformed_json_lines_skipped(self):
+        """Lines with bad JSON are skipped without crashing."""
+        path = self._path()
+        with open(path, 'wb') as f:
+            f.write(b'not json at all\n')
+            f.write(b'{broken json\n')
+            f.write(json.dumps(_make_entry('user', 'Valid question')).encode('utf-8') + b'\n')
+        messages, offset = parse_transcript_from_offset(path, 0)
+        # Only the valid user entry extracted (no paired assistant so messages list has 1)
+        self.assertEqual(len(messages), 1)
+        self.assertGreater(offset, 0)
+
+    def test_only_user_and_assistant_extracted(self):
+        """Entries with other types (e.g. 'system') are ignored."""
+        path = self._path()
+        entries = [
+            {'type': 'system', 'message': {'content': 'sys msg'}, 'timestamp': '2025-01-05T09:00:00Z'},
+            _make_entry('user', 'Hello'),
+            _make_entry('assistant', 'Hi there'),
+        ]
+        with open(path, 'wb') as f:
+            for e in entries:
+                f.write(json.dumps(e).encode('utf-8') + b'\n')
+        messages, offset = parse_transcript_from_offset(path, 0)
+        self.assertEqual(len(messages), 2)
+        roles = [m['role'] for m in messages]
+        self.assertIn('user', roles)
+        self.assertIn('assistant', roles)
+        self.assertNotIn('system', roles)
+
+    def test_multibyte_utf8_content_no_offset_corruption(self):
+        """Multi-byte UTF-8 characters parse correctly and offset stays valid."""
+        path = self._path()
+        # Japanese characters are 3 bytes each in UTF-8
+        user_text = 'こんにちは'  # 5 x 3 = 15 bytes
+        asst_text = '元気です'    # 4 x 3 = 12 bytes
+        entries = [
+            _make_entry('user', user_text),
+            _make_entry('assistant', asst_text),
+        ]
+        with open(path, 'wb') as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False).encode('utf-8') + b'\n')
+
+        messages, offset = parse_transcript_from_offset(path, 0)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]['text'], user_text)
+        self.assertEqual(messages[1]['text'], asst_text)
+
+        # offset should equal file size
+        file_size = Path(path).stat().st_size
+        self.assertEqual(offset, file_size)
+
+    def test_incremental_offset_parsing(self):
+        """Parsing from a mid-file offset returns only later entries."""
+        path = self._path()
+        # Write first pair
+        first_entries = [
+            _make_entry('user', 'First question', '2025-01-05T09:00:00Z'),
+            _make_entry('assistant', 'First answer', '2025-01-05T09:00:05Z'),
+        ]
+        with open(path, 'wb') as f:
+            for e in first_entries:
+                f.write(json.dumps(e).encode('utf-8') + b'\n')
+
+        # Parse full file to get mid-file offset
+        _, mid_offset = parse_transcript_from_offset(path, 0)
+        self.assertGreater(mid_offset, 0)
+
+        # Append second pair
+        second_entries = [
+            _make_entry('user', 'Second question', '2025-01-05T09:01:00Z'),
+            _make_entry('assistant', 'Second answer', '2025-01-05T09:01:05Z'),
+        ]
+        with open(path, 'ab') as f:
+            for e in second_entries:
+                f.write(json.dumps(e).encode('utf-8') + b'\n')
+
+        # Parse from mid_offset — should only get second pair
+        messages, new_offset = parse_transcript_from_offset(path, mid_offset)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]['text'], 'Second question')
+        self.assertEqual(messages[1]['text'], 'Second answer')
+        self.assertGreater(new_offset, mid_offset)
 
 
 if __name__ == '__main__':

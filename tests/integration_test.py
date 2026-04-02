@@ -21,8 +21,10 @@ from prompt_submit import run_hook as prompt_hook
 from post_compact import run_hook as compact_hook
 from session_end import run_hook as end_hook
 from db import (get_connection, get_session, get_exchanges, search_exchanges_fts,
-                search_exchanges_global, get_stats)
+                search_exchanges_global, get_stats, insert_connection, insert_highlight,
+                get_highlights_for_connections)
 from manage_tags import add_tag, search_by_tag
+from manage_connections import inbox
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +400,98 @@ class TestCrossProjectSearch(unittest.TestCase):
         project_paths = {r['project_path'] for r in global_results}
         self.assertIn('triton-metal', project_paths)
         self.assertIn('cuda-kernels', project_paths)
+
+
+# ---------------------------------------------------------------------------
+# TestHighlightConnectionInbox
+# ---------------------------------------------------------------------------
+
+class TestHighlightConnectionInbox(unittest.TestCase):
+    """Integration: highlight created on session B surfaces in session A's inbox."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / 'recall.db'
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_transcript(self, name, pairs):
+        path = str(Path(self.temp_dir) / name)
+        _write_transcript(path, pairs)
+        return path
+
+    def _hook_input(self, session_id, transcript, project_hash='hash-inbox'):
+        return {
+            'session_id': session_id,
+            'transcript_path': transcript,
+            'user_prompt': 'hello',
+            'project_path': 'inbox-project',
+            'project_hash': project_hash,
+        }
+
+    def test_highlight_appears_in_inbox_then_clears(self):
+        import prompt_submit
+
+        # Prevent migration from picking up any real legacy index.json
+        original_legacy_file = prompt_submit.LEGACY_INDEX_FILE
+        prompt_submit.LEGACY_INDEX_FILE = Path(self.temp_dir) / 'no-such-index.json'
+
+        try:
+            # ------------------------------------------------------------------ #
+            # Step 1 — Create session A and session B via prompt_hook             #
+            # ------------------------------------------------------------------ #
+            transcript_a = self._make_transcript('transcript_a.jsonl', [
+                ('What is session A doing?', 'Session A is doing X.', '2025-01-05T09:00:00Z'),
+            ])
+            prompt_hook(self._hook_input('sess-inbox-a', transcript_a),
+                        db_path=self.db_path)
+
+            transcript_b = self._make_transcript('transcript_b.jsonl', [
+                ('What is session B doing?', 'Session B is doing Y.', '2025-01-05T09:01:00Z'),
+            ])
+            prompt_hook(self._hook_input('sess-inbox-b', transcript_b),
+                        db_path=self.db_path)
+
+            # ------------------------------------------------------------------ #
+            # Step 2 — Connect A to watch B                                       #
+            # ------------------------------------------------------------------ #
+            conn = get_connection(self.db_path)
+            insert_connection(conn, 'sess-inbox-a', 'sess-inbox-b', 'kernel work',
+                               check_mode='explicit', delivery_mode='silent')
+            conn.close()
+
+            # ------------------------------------------------------------------ #
+            # Step 3 — Create a highlight on B                                    #
+            # ------------------------------------------------------------------ #
+            conn = get_connection(self.db_path)
+            insert_highlight(conn, 'sess-inbox-b', 'Found a warp divergence fix', 'perf', 'explicit')
+            conn.close()
+
+            # ------------------------------------------------------------------ #
+            # Step 4 — Run inbox for A — highlight should appear                  #
+            # ------------------------------------------------------------------ #
+            conn = get_connection(self.db_path)
+            result = inbox(conn, 'sess-inbox-a')
+            conn.close()
+
+            self.assertIn('warp divergence fix', result,
+                          'Highlight from session B should appear in session A inbox')
+            self.assertIn('sess-inbox-b'[:8], result,
+                          'Session B short ID should appear in inbox')
+
+            # ------------------------------------------------------------------ #
+            # Step 5 — Run inbox again — should be empty (already checked)        #
+            # ------------------------------------------------------------------ #
+            conn = get_connection(self.db_path)
+            result2 = inbox(conn, 'sess-inbox-a')
+            conn.close()
+
+            self.assertIn('No new highlights', result2,
+                          'Second inbox call should return no new highlights')
+
+        finally:
+            prompt_submit.LEGACY_INDEX_FILE = original_legacy_file
 
 
 if __name__ == '__main__':

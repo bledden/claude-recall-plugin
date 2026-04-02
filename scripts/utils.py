@@ -262,4 +262,6 @@ def find_exchanges_by_time(
 
 def search_in_text(text: str, keyword: str) -> bool:
     """Check if keyword exists in text (case-insensitive)."""
+    if not text:
+        return False
     return keyword.lower() in text.lower()

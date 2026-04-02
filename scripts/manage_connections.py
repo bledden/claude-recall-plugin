@@ -216,6 +216,12 @@ def config(conn, session_id: str, key: str, value: str) -> str:
         valid = ', '.join(sorted(VALID_CONFIG_KEYS))
         return f"*Error: invalid config key '{key}'. Valid keys: {valid}.*"
 
+    if key == 'check_mode' and value not in ('explicit', 'decay'):
+        return f"*Error: check_mode must be 'explicit' or 'decay', got '{value}'.*"
+
+    if key == 'delivery_mode' and value not in ('silent', 'inject'):
+        return f"*Error: delivery_mode must be 'silent' or 'inject', got '{value}'.*"
+
     # Connection-level keys — update all connections for this watcher
     _COLUMN_SAFE = {'check_mode': 'check_mode', 'delivery_mode': 'delivery_mode'}
     if key in _COLUMN_SAFE:

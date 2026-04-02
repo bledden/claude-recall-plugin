@@ -85,13 +85,13 @@ def search_exchanges(exchanges: List[Dict], keyword: str) -> List[Dict]:
     """
     results = []
     for ex in exchanges:
-        if search_in_text(ex.get('preview', ''), keyword):
+        if search_in_text(ex.get('preview') or '', keyword):
             results.append(ex)
             continue
-        if search_in_text(ex.get('user_text', ''), keyword):
+        if search_in_text(ex.get('user_text') or '', keyword):
             results.append(ex)
             continue
-        if search_in_text(ex.get('assistant_text', ''), keyword):
+        if search_in_text(ex.get('assistant_text') or '', keyword):
             results.append(ex)
     return results
 
