@@ -10,7 +10,9 @@ reads via WAL mode with a 5-second busy timeout.
 
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -73,7 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_hash);
 # Connection & schema
 # ---------------------------------------------------------------------------
 
-def get_connection(db_path=None):
+def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Return a WAL-mode SQLite connection with row_factory=sqlite3.Row.
 
     Creates the database directory and schema if they do not exist.
@@ -98,6 +100,7 @@ def get_connection(db_path=None):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout={}".format(DB_BUSY_TIMEOUT_MS))
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA_SQL)
     return conn
 
@@ -105,8 +108,9 @@ def get_connection(db_path=None):
 # Session CRUD
 # ---------------------------------------------------------------------------
 
-def insert_session(conn, session_id, project_path, project_hash, started_at,
-                   transcript_path=None):
+def insert_session(conn: sqlite3.Connection, session_id: str, project_path: str,
+                   project_hash: str, started_at: str,
+                   transcript_path: Optional[str] = None) -> None:
     """Insert a new session (INSERT OR IGNORE)."""
     conn.execute(
         "INSERT OR IGNORE INTO sessions "
@@ -117,7 +121,7 @@ def insert_session(conn, session_id, project_path, project_hash, started_at,
     conn.commit()
 
 
-def get_session(conn, session_id):
+def get_session(conn: sqlite3.Connection, session_id: str) -> Optional[Dict]:
     """Return a session as a dict, or None if not found."""
     cur = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
     row = cur.fetchone()
@@ -126,7 +130,8 @@ def get_session(conn, session_id):
     return dict(row)
 
 
-def list_sessions(conn, project_hash=None, project_path_contains=None):
+def list_sessions(conn: sqlite3.Connection, project_hash: Optional[str] = None,
+                  project_path_contains: Optional[str] = None) -> List[Dict]:
     """List sessions, optionally filtered, ordered by started_at DESC."""
     sql = "SELECT * FROM sessions WHERE 1=1"
     params = []
@@ -141,7 +146,7 @@ def list_sessions(conn, project_hash=None, project_path_contains=None):
     return [dict(r) for r in cur.fetchall()]
 
 
-def end_session(conn, session_id, ended_at):
+def end_session(conn: sqlite3.Connection, session_id: str, ended_at: str) -> None:
     """Mark a session as ended."""
     conn.execute(
         "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
@@ -150,7 +155,8 @@ def end_session(conn, session_id, ended_at):
     conn.commit()
 
 
-def update_session_offset(conn, session_id, byte_offset, exchange_count):
+def update_session_offset(conn: sqlite3.Connection, session_id: str,
+                          byte_offset: int, exchange_count: int) -> None:
     """Update the incremental-read offset and exchange count for a session."""
     conn.execute(
         "UPDATE sessions SET byte_offset = ?, exchange_count = ? WHERE session_id = ?",
@@ -162,7 +168,8 @@ def update_session_offset(conn, session_id, byte_offset, exchange_count):
 # Exchange CRUD
 # ---------------------------------------------------------------------------
 
-def insert_exchanges(conn, session_id, exchanges):
+def insert_exchanges(conn: sqlite3.Connection, session_id: str,
+                     exchanges: List[Dict[str, Any]]) -> None:
     """Insert a batch of exchanges and sync the FTS5 index.
 
     Args:
@@ -231,7 +238,8 @@ def _delete_fts_rows(conn, session_id):
         )
 
 
-def get_exchanges(conn, session_id, last_n=None):
+def get_exchanges(conn: sqlite3.Connection, session_id: str,
+                  last_n: Optional[int] = None) -> List[Dict]:
     """Get exchanges for a session, ordered by idx.
 
     Args:
@@ -242,7 +250,7 @@ def get_exchanges(conn, session_id, last_n=None):
     Returns:
         List of dicts.
     """
-    if last_n is not None:
+    if last_n is not None and last_n > 0:
         cur = conn.execute(
             "SELECT * FROM exchanges WHERE session_id = ? "
             "ORDER BY idx DESC LIMIT ?",
@@ -262,7 +270,10 @@ def get_exchanges(conn, session_id, last_n=None):
 # Search
 # ---------------------------------------------------------------------------
 
-def search_exchanges_fts(conn, query, session_id=None, project_hash=None, limit=10):
+def search_exchanges_fts(conn: sqlite3.Connection, query: str,
+                         session_id: Optional[str] = None,
+                         project_hash: Optional[str] = None,
+                         limit: int = 10) -> List[Dict]:
     """Full-text search over exchanges via FTS5.
 
     Args:
@@ -303,7 +314,8 @@ def search_exchanges_fts(conn, query, session_id=None, project_hash=None, limit=
     return [dict(r) for r in cur.fetchall()]
 
 
-def search_exchanges_global(conn, query, limit=20):
+def search_exchanges_global(conn: sqlite3.Connection, query: str,
+                            limit: int = 20) -> List[Dict]:
     """Search across ALL sessions/projects, enriching results with session info.
 
     Returns:
@@ -326,7 +338,7 @@ def search_exchanges_global(conn, query, limit=20):
 # Maintenance
 # ---------------------------------------------------------------------------
 
-def prune_session(conn, session_id):
+def prune_session(conn: sqlite3.Connection, session_id: str) -> None:
     """Delete a session, its exchanges (including FTS entries), and tags."""
     # Remove FTS entries BEFORE deleting exchanges (needs column values)
     _delete_fts_rows(conn, session_id)
@@ -337,7 +349,7 @@ def prune_session(conn, session_id):
     conn.commit()
 
 
-def prune_before_date(conn, before_date):
+def prune_before_date(conn: sqlite3.Connection, before_date: str) -> int:
     """Delete all sessions started before the given ISO date string.
 
     Returns:
@@ -352,7 +364,7 @@ def prune_before_date(conn, before_date):
     return len(session_ids)
 
 
-def get_stats(conn, db_path=None):
+def get_stats(conn: sqlite3.Connection, db_path: Optional[Path] = None) -> Dict:
     """Return summary statistics about the database.
 
     Args:
@@ -370,8 +382,18 @@ def get_stats(conn, db_path=None):
     total_exchanges = conn.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
     total_tags = conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
 
-    cur = conn.execute("SELECT DISTINCT project_path FROM sessions ORDER BY project_path")
-    projects = [row['project_path'] for row in cur.fetchall()]
+    cur = conn.execute(
+        "SELECT project_path, COUNT(*) AS session_count, SUM(exchange_count) AS exchange_total "
+        "FROM sessions GROUP BY project_path ORDER BY project_path"
+    )
+    projects = [
+        {
+            'project_path': row['project_path'],
+            'session_count': row['session_count'],
+            'exchange_total': row['exchange_total'] or 0,
+        }
+        for row in cur.fetchall()
+    ]
 
     try:
         db_size_bytes = os.path.getsize(db_path)
@@ -387,14 +409,15 @@ def get_stats(conn, db_path=None):
     }
 
 
-def export_session_json(conn, session_id):
-    """Export a full session (session row + exchanges + tags) as a dict.
+def export_session_json(conn: sqlite3.Connection, session_id: str) -> Dict:
+    """Export a full session (session row + exchanges + tags) as a flat dict.
 
     Returns:
-        Dict with keys 'session', 'exchanges', 'tags'.  Returns None-valued
-        session if the session_id does not exist.
+        Flat dict with session fields spread at top level plus 'exchanges' and
+        'tags' keys.  Session fields will be None-valued if session_id does not
+        exist.
     """
-    session = get_session(conn, session_id)
+    session = get_session(conn, session_id) or {}
 
     cur = conn.execute(
         "SELECT * FROM exchanges WHERE session_id = ? ORDER BY idx",
@@ -408,8 +431,37 @@ def export_session_json(conn, session_id):
     )
     tags = [dict(r) for r in cur.fetchall()]
 
-    return {
-        'session': session,
-        'exchanges': exchanges,
-        'tags': tags,
-    }
+    return {**session, 'exchanges': exchanges, 'tags': tags}
+
+# ---------------------------------------------------------------------------
+# Tag CRUD
+# ---------------------------------------------------------------------------
+
+def insert_tag(conn: sqlite3.Connection, tag: str, session_id: str,
+               exchange_idx: Optional[int] = None, source: str = 'manual') -> None:
+    """Insert a tag. INSERT OR IGNORE for idempotency."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO tags (tag, session_id, exchange_idx, source, created_at) VALUES (?, ?, ?, ?, ?)",
+        (tag, session_id, exchange_idx, source, now)
+    )
+    conn.commit()
+
+
+def get_tags(conn: sqlite3.Connection, session_id: Optional[str] = None,
+             project_hash: Optional[str] = None) -> List[Dict]:
+    """Get tags, optionally filtered by session or project."""
+    if session_id:
+        rows = conn.execute(
+            "SELECT * FROM tags WHERE session_id = ? ORDER BY tag",
+            (session_id,)
+        ).fetchall()
+    elif project_hash:
+        rows = conn.execute(
+            "SELECT t.* FROM tags t JOIN sessions s ON t.session_id = s.session_id "
+            "WHERE s.project_hash = ? ORDER BY t.tag",
+            (project_hash,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM tags ORDER BY tag").fetchall()
+    return [dict(r) for r in rows]

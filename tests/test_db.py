@@ -27,6 +27,8 @@ from db import (
     prune_before_date,
     get_stats,
     export_session_json,
+    insert_tag,
+    get_tags,
     DB_DIR,
     DB_PATH,
     DB_BUSY_TIMEOUT_MS,
@@ -375,7 +377,7 @@ class TestMaintenance(unittest.TestCase):
     def test_export_session_json(self):
         """Export a session as a complete JSON-serializable dict."""
         data = export_session_json(self.conn, 'sess-m1')
-        self.assertEqual(data['session']['session_id'], 'sess-m1')
+        self.assertEqual(data['session_id'], 'sess-m1')
         self.assertEqual(len(data['exchanges']), 1)
         self.assertEqual(len(data['tags']), 1)
         self.assertEqual(data['tags'][0]['tag'], 'rust')
