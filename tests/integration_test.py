@@ -1,368 +1,404 @@
 #!/usr/bin/env python3
 """
-Integration test for context-recall plugin.
+Integration tests for Claude Context Recall plugin v2.
 
-This test simulates what Claude Code actually does:
-1. Creates a real transcript file (JSON Lines format)
-2. Calls the hook with real JSON input (like Claude Code does)
-3. Verifies the snapshot is saved correctly
-4. Calls the extract script and verifies output
-
-No mocks - all real files and real execution.
+Covers full lifecycle, v1-to-v2 migration, and cross-project search
+using the real SQLite backend — no mocks.
 """
 
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-def create_test_transcript(path: str, include_long_messages: bool = False) -> None:
-    """Create a realistic transcript file in JSON Lines format.
+from prompt_submit import run_hook as prompt_hook
+from post_compact import run_hook as compact_hook
+from session_end import run_hook as end_hook
+from db import (get_connection, get_session, get_exchanges, search_exchanges_fts,
+                search_exchanges_global, get_stats)
+from manage_tags import add_tag, search_by_tag
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _write_transcript(path, pairs):
+    """Write test transcript.
 
     Args:
-        path: Path to write the transcript
-        include_long_messages: If True, include very long messages to test truncation
+        path: Path (str or Path) to write.
+        pairs: List of (user_text, assistant_text, timestamp) tuples.
     """
-    if include_long_messages:
-        # Create messages that exceed the 1000 char limit
-        long_user_text = "This is a very long user message. " * 100  # ~3500 chars
-        long_assistant_text = "This is a very long assistant response with lots of detail. " * 100  # ~6000 chars
-        messages = [
-            {"role": "user", "message": {"content": [{"type": "text", "text": long_user_text}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": long_assistant_text}]}},
-            {"role": "user", "message": {"content": [{"type": "text", "text": "Short follow-up question"}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": "Short response"}]}},
-        ]
-    else:
-        messages = [
-            {"role": "user", "message": {"content": [{"type": "text", "text": "Hello, I need help with a Python project"}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": "I'd be happy to help with your Python project. What are you working on?"}]}},
-            {"role": "user", "message": {"content": [{"type": "text", "text": "I'm building a CLI tool that processes JSON files"}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": "That sounds great! Let me help you structure that. First, let's think about the input/output format..."}]}},
-            {"role": "user", "message": {"content": [{"type": "text", "text": "I want it to validate the JSON and report errors"}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": "Perfect. We can use Python's json module with try/except to catch JSONDecodeError. Here's a basic structure..."}]}},
-            {"role": "user", "message": {"content": [{"type": "text", "text": "Can you also add support for JSON5 format?"}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": "Yes! We can use the pyjson5 library for that. Let me show you how to integrate it..."}]}},
-            {"role": "user", "message": {"content": [{"type": "text", "text": "Great, and what about performance for large files?"}]}},
-            {"role": "assistant", "message": {"content": [{"type": "text", "text": "For large files, we should use streaming parsing with ijson library. This avoids loading the entire file into memory..."}]}},
-        ]
-
     with open(path, 'w') as f:
-        for msg in messages:
-            f.write(json.dumps(msg) + '\n')
+        for user, asst, ts in pairs:
+            f.write(json.dumps({
+                'type': 'user',
+                'message': {'content': [{'type': 'text', 'text': user}]},
+                'timestamp': ts,
+            }) + '\n')
+            f.write(json.dumps({
+                'type': 'assistant',
+                'message': {'content': [{'type': 'text', 'text': asst}]},
+                'timestamp': ts,
+            }) + '\n')
 
 
-def run_hook(hooks_dir: str, input_data: dict) -> subprocess.CompletedProcess:
-    """Run the hook script with given input, just like Claude Code does."""
-    return subprocess.run(
-        ['python3', 'save_context_snapshot.py'],
-        input=json.dumps(input_data),
-        capture_output=True,
-        text=True,
-        cwd=hooks_dir
-    )
+# ---------------------------------------------------------------------------
+# TestFullLifecycle
+# ---------------------------------------------------------------------------
 
+class TestFullLifecycle(unittest.TestCase):
+    """End-to-end: create session, add exchanges, /clear, cross-session search,
+    tagging, PostCompact nudge, SessionEnd."""
 
-def run_extract_script(scripts_dir: str) -> subprocess.CompletedProcess:
-    """Run the extract script, just like the command does."""
-    return subprocess.run(
-        ['python3', 'extract_context.py'],
-        capture_output=True,
-        text=True,
-        cwd=scripts_dir
-    )
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / 'recall.db'
+        self.transcript = str(Path(self.temp_dir) / 'transcript.jsonl')
 
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-def test_full_flow():
-    """Test the complete flow from transcript to /recall output."""
-    print("=" * 60)
-    print("INTEGRATION TEST: context-recall plugin")
-    print("=" * 60)
-
-    # Setup paths
-    plugin_dir = Path(__file__).parent.parent
-    hooks_dir = plugin_dir / 'hooks'
-    scripts_dir = plugin_dir / 'scripts'
-
-    # Create temp directories for test data
-    temp_dir = tempfile.mkdtemp()
-    transcript_path = os.path.join(temp_dir, 'transcript.jsonl')
-
-    # Override HOME for this test to isolate snapshot storage
-    original_home = os.environ.get('HOME')
-    test_home = tempfile.mkdtemp()
-    os.environ['HOME'] = test_home
-
-    try:
-        print(f"\n[1] Creating test transcript at: {transcript_path}")
-        create_test_transcript(transcript_path)
-
-        # Verify transcript was created
-        with open(transcript_path) as f:
-            lines = f.readlines()
-        print(f"    Created transcript with {len(lines)} messages")
-
-        print(f"\n[2] Running hook (simulating UserPromptSubmit event)...")
-        hook_input = {
-            "session_id": "test-session-12345",
-            "transcript_path": transcript_path,
-            "user_prompt": "What were we discussing?",
-            "hook_event_name": "UserPromptSubmit"
+    def _hook_input(self, session_id, transcript, project_path='triton-metal',
+                    project_hash='hash-001', user_prompt='hello'):
+        return {
+            'session_id': session_id,
+            'transcript_path': transcript,
+            'user_prompt': user_prompt,
+            'project_path': project_path,
+            'project_hash': project_hash,
         }
 
-        result = run_hook(str(hooks_dir), hook_input)
-        print(f"    Exit code: {result.returncode}")
-        print(f"    Stdout: {result.stdout.strip()}")
-        if result.stderr:
-            print(f"    Stderr: {result.stderr.strip()}")
+    def test_full_lifecycle(self):
+        import prompt_submit
 
-        if result.returncode != 0:
-            print("    FAILED: Hook exited with non-zero code")
-            return False
+        # Prevent migration from picking up any real legacy index.json
+        original_legacy_file = prompt_submit.LEGACY_INDEX_FILE
+        prompt_submit.LEGACY_INDEX_FILE = Path(self.temp_dir) / 'no-such-index.json'
 
-        # Verify hook output is valid JSON
         try:
-            hook_output = json.loads(result.stdout.strip())
-            print(f"    Hook output (parsed): {hook_output}")
-        except json.JSONDecodeError as e:
-            print(f"    FAILED: Hook output is not valid JSON: {e}")
-            return False
+            self._run_lifecycle(prompt_submit)
+        finally:
+            prompt_submit.LEGACY_INDEX_FILE = original_legacy_file
 
-        print(f"\n[3] Checking snapshot was saved...")
-        snapshot_dir = Path(test_home) / '.claude' / 'context-recall'
-        current_snapshot = snapshot_dir / 'current.json'
-        session_snapshot = snapshot_dir / 'test-session-12345.json'
+    def _run_lifecycle(self, prompt_submit):
+        # ------------------------------------------------------------------ #
+        # Step 1 — Write transcript with 2 kernel exchanges                   #
+        # ------------------------------------------------------------------ #
+        _write_transcript(self.transcript, [
+            ('How does triton reduction work?', 'It uses a tl.sum reduction kernel.', '2025-01-05T09:00:00Z'),
+            ('What is the tile size for reduction?', 'Typically BLOCK_SIZE=256 for Metal backends.', '2025-01-05T09:01:00Z'),
+        ])
 
-        if not current_snapshot.exists():
-            print(f"    FAILED: current.json not found at {current_snapshot}")
-            return False
+        # ------------------------------------------------------------------ #
+        # Step 2 — prompt_hook() → session created, exchange_count=2          #
+        # ------------------------------------------------------------------ #
+        result = prompt_hook(self._hook_input('sess-lifecycle-a', self.transcript),
+                             db_path=self.db_path)
+        self.assertEqual(result, {})
 
-        if not session_snapshot.exists():
-            print(f"    FAILED: session snapshot not found at {session_snapshot}")
-            return False
+        conn = get_connection(self.db_path)
+        session_a = get_session(conn, 'sess-lifecycle-a')
+        self.assertIsNotNone(session_a)
+        self.assertEqual(session_a['exchange_count'], 2)
+        exchanges_a = get_exchanges(conn, 'sess-lifecycle-a')
+        self.assertEqual(len(exchanges_a), 2)
+        conn.close()
 
-        print(f"    Found: {current_snapshot}")
-        print(f"    Found: {session_snapshot}")
+        # ------------------------------------------------------------------ #
+        # Step 3 — New transcript (simulates /clear) with new session_id      #
+        # ------------------------------------------------------------------ #
+        transcript_b = str(Path(self.temp_dir) / 'transcript_b.jsonl')
+        _write_transcript(transcript_b, [
+            ('Now optimize the backward pass.', 'Use autograd with Metal dispatch.', '2025-01-05T10:00:00Z'),
+        ])
 
-        # Read and verify snapshot content
-        with open(current_snapshot) as f:
-            snapshot = json.load(f)
+        result = prompt_hook(self._hook_input('sess-lifecycle-b', transcript_b),
+                             db_path=self.db_path)
+        self.assertEqual(result, {})
 
-        print(f"\n[4] Verifying snapshot content...")
-        print(f"    Session ID: {snapshot.get('session_id')}")
-        print(f"    Message count: {snapshot.get('message_count')}")
-        print(f"    Exchanges: {len(snapshot.get('exchanges', []))}")
-        print(f"    Timestamp: {snapshot.get('timestamp')}")
+        conn = get_connection(self.db_path)
+        session_a_check = get_session(conn, 'sess-lifecycle-a')
+        session_b = get_session(conn, 'sess-lifecycle-b')
+        self.assertIsNotNone(session_a_check, 'Session A must still exist after /clear')
+        self.assertIsNotNone(session_b, 'Session B must be created')
+        conn.close()
 
-        if snapshot.get('session_id') != 'test-session-12345':
-            print("    FAILED: Wrong session_id")
-            return False
+        # ------------------------------------------------------------------ #
+        # Step 4 — Cross-session FTS search for "reduction" within project    #
+        # ------------------------------------------------------------------ #
+        conn = get_connection(self.db_path)
+        fts_results = search_exchanges_fts(conn, 'reduction',
+                                           project_hash='hash-001')
+        self.assertGreater(len(fts_results), 0,
+                           'FTS search for "reduction" should match session A')
+        conn.close()
 
-        if snapshot.get('message_count') != 10:
-            print(f"    FAILED: Expected 10 messages, got {snapshot.get('message_count')}")
-            return False
+        # ------------------------------------------------------------------ #
+        # Step 5 — Manual tags on both sessions, search_by_tag finds both     #
+        # ------------------------------------------------------------------ #
+        conn = get_connection(self.db_path)
+        add_tag(conn, 'triton', 'sess-lifecycle-a')
+        add_tag(conn, 'triton', 'sess-lifecycle-b')
+        conn.close()
 
-        exchanges = snapshot.get('exchanges', [])
-        if len(exchanges) != 5:
-            print(f"    FAILED: Expected 5 exchanges, got {len(exchanges)}")
-            return False
+        conn = get_connection(self.db_path)
+        tag_results = search_by_tag(conn, 'triton')
+        tagged_sessions = {r['session_id'] for r in tag_results}
+        self.assertIn('sess-lifecycle-a', tagged_sessions)
+        self.assertIn('sess-lifecycle-b', tagged_sessions)
+        conn.close()
 
-        print(f"\n[5] Running extract_context.py (simulating /recall command)...")
-        result = run_extract_script(str(scripts_dir))
-        print(f"    Exit code: {result.returncode}")
+        # ------------------------------------------------------------------ #
+        # Step 6 — compact_hook() → systemMessage with exchange count         #
+        # ------------------------------------------------------------------ #
+        compact_result = compact_hook(
+            {'session_id': 'sess-lifecycle-a'},
+            db_path=self.db_path,
+        )
+        self.assertIn('systemMessage', compact_result)
+        msg = compact_result['systemMessage']
+        # Should mention the exchange count for this session
+        self.assertIn('2', msg)
 
-        if result.returncode != 0:
-            print(f"    FAILED: Script exited with non-zero code")
-            print(f"    Stderr: {result.stderr}")
-            return False
+        # ------------------------------------------------------------------ #
+        # Step 7 — end_hook() → ended_at set                                 #
+        # ------------------------------------------------------------------ #
+        end_result = end_hook(
+            {'session_id': 'sess-lifecycle-b'},
+            db_path=self.db_path,
+        )
+        self.assertEqual(end_result, {})
 
-        output = result.stdout
-        print(f"\n[6] Verifying /recall output...")
-        print("-" * 40)
-        print(output[:1000] + "..." if len(output) > 1000 else output)
-        print("-" * 40)
+        conn = get_connection(self.db_path)
+        session_b_ended = get_session(conn, 'sess-lifecycle-b')
+        self.assertIsNotNone(session_b_ended['ended_at'],
+                             'ended_at must be set after end_hook')
+        conn.close()
 
-        # Check output contains expected content
-        checks = [
-            ("Exchange 1" in output, "Contains 'Exchange 1'"),
-            ("Exchange 5" in output, "Contains 'Exchange 5'"),
-            ("User:" in output, "Contains 'User:' labels"),
-            ("Assistant:" in output, "Contains 'Assistant:' labels"),
-            ("JSON" in output, "Contains conversation content about JSON"),
-            ("test-session-12345" in output or "messages in session" in output, "Contains session info"),
-        ]
+        # ------------------------------------------------------------------ #
+        # Step 8 — get_stats() → total_sessions=2, total_exchanges=3         #
+        # ------------------------------------------------------------------ #
+        conn = get_connection(self.db_path)
+        stats = get_stats(conn, db_path=self.db_path)
+        conn.close()
 
-        all_passed = True
-        for check, description in checks:
-            status = "PASS" if check else "FAIL"
-            print(f"    [{status}] {description}")
-            if not check:
-                all_passed = False
+        self.assertEqual(stats['total_sessions'], 2)
+        self.assertEqual(stats['total_exchanges'], 3)
 
-        print(f"\n[7] Testing /recall logging (observability)...")
-        hook_input_recall = {
-            "session_id": "test-session-12345",
-            "transcript_path": transcript_path,
-            "user_prompt": "/recall",
-            "hook_event_name": "UserPromptSubmit"
+
+# ---------------------------------------------------------------------------
+# TestMigrationFromV1
+# ---------------------------------------------------------------------------
+
+class TestMigrationFromV1(unittest.TestCase):
+    """Migration from a v1-format index.json."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / 'recall.db'
+        self.transcript = str(Path(self.temp_dir) / 'transcript.jsonl')
+
+        # Create the legacy recall dir within the temp dir
+        self.legacy_dir = Path(self.temp_dir) / 'context-recall'
+        self.legacy_dir.mkdir(parents=True, exist_ok=True)
+        self.legacy_index = self.legacy_dir / 'index.json'
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_migration_from_v1(self):
+        import prompt_submit
+
+        # ------------------------------------------------------------------ #
+        # Step 1 — Create a v1-format index.json with 2 exchanges             #
+        # ------------------------------------------------------------------ #
+        v1_data = {
+            'session_id': 'sess-legacy-v1',
+            'session_start': '2025-01-01T08:00:00Z',
+            'transcript_path': '/old/transcript.jsonl',
+            '_byte_offset': 0,
+            'exchanges': [
+                {
+                    'idx': 1,
+                    'timestamp': '2025-01-01T08:01:00Z',
+                    'preview': 'How does cuda reduction work?',
+                    'user_text': 'How does cuda reduction work?',
+                    'assistant_text': 'CUDA uses warp shuffle for reduction.',
+                },
+                {
+                    'idx': 2,
+                    'timestamp': '2025-01-01T08:02:00Z',
+                    'preview': 'What about shared memory?',
+                    'user_text': 'What about shared memory?',
+                    'assistant_text': 'Shared memory tiles dramatically speed up reductions.',
+                },
+            ],
         }
+        with open(self.legacy_index, 'w') as f:
+            json.dump(v1_data, f)
 
-        result = run_hook(str(hooks_dir), hook_input_recall)
-        print(f"    Exit code: {result.returncode}")
+        # ------------------------------------------------------------------ #
+        # Step 2 — Write a minimal transcript for the new session             #
+        # ------------------------------------------------------------------ #
+        _write_transcript(self.transcript, [
+            ('New session question.', 'New session answer.', '2025-01-05T10:00:00Z'),
+        ])
 
-        # Check stderr for logging
-        if "[context-recall]" in result.stderr:
-            print(f"    [PASS] Console logging works: {result.stderr.strip()}")
-        else:
-            print(f"    [FAIL] No console logging found")
-            all_passed = False
-
-        # Check stdout for systemMessage
+        # ------------------------------------------------------------------ #
+        # Step 3 — prompt_hook() with new session_id → triggers migration     #
+        # ------------------------------------------------------------------ #
+        original_legacy_file = prompt_submit.LEGACY_INDEX_FILE
+        prompt_submit.LEGACY_INDEX_FILE = self.legacy_index
         try:
-            output = json.loads(result.stdout.strip())
-            if "systemMessage" in output and "Observability" in output["systemMessage"]:
-                print(f"    [PASS] systemMessage returned: {output['systemMessage']}")
-            else:
-                print(f"    [FAIL] No systemMessage with Observability")
-                all_passed = False
-        except:
-            print(f"    [FAIL] Could not parse hook output")
-            all_passed = False
+            result = prompt_hook(
+                {
+                    'session_id': 'sess-new-after-migration',
+                    'transcript_path': self.transcript,
+                    'user_prompt': 'hello',
+                    'project_path': '/tmp/project',
+                    'project_hash': 'hash-mig',
+                },
+                db_path=self.db_path,
+            )
+        finally:
+            prompt_submit.LEGACY_INDEX_FILE = original_legacy_file
 
-        # Check log file
-        log_file = Path(test_home) / '.claude' / 'recall-events.log'
-        if log_file.exists():
-            with open(log_file) as f:
-                log_content = f.read()
-            print(f"    [PASS] Log file created with content:")
-            print(f"           {log_content.strip()}")
-        else:
-            print(f"    [FAIL] Log file not created at {log_file}")
-            all_passed = False
+        self.assertEqual(result, {})
 
-        print("\n" + "=" * 60)
-        if all_passed:
-            print("ALL TESTS PASSED")
-        else:
-            print("SOME TESTS FAILED")
-        print("=" * 60)
+        # ------------------------------------------------------------------ #
+        # Step 4 — Legacy session in DB with its exchanges; new session exists #
+        # ------------------------------------------------------------------ #
+        conn = get_connection(self.db_path)
 
-        return all_passed
+        legacy_session = get_session(conn, 'sess-legacy-v1')
+        self.assertIsNotNone(legacy_session, 'Legacy session should be migrated into DB')
+        legacy_exchanges = get_exchanges(conn, 'sess-legacy-v1')
+        self.assertEqual(len(legacy_exchanges), 2, 'Both legacy exchanges should be in DB')
 
-    finally:
-        # Cleanup
-        os.environ['HOME'] = original_home
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        shutil.rmtree(test_home, ignore_errors=True)
+        new_session = get_session(conn, 'sess-new-after-migration')
+        self.assertIsNotNone(new_session, 'New session should also exist')
+        conn.close()
+
+        # ------------------------------------------------------------------ #
+        # Step 5 — index.json renamed to index.json.migrated                 #
+        # ------------------------------------------------------------------ #
+        migrated_path = self.legacy_index.with_suffix('.json.migrated')
+        self.assertFalse(self.legacy_index.exists(),
+                         'Original index.json should be gone after migration')
+        self.assertTrue(migrated_path.exists(),
+                        'index.json.migrated should exist after migration')
+
+        # ------------------------------------------------------------------ #
+        # Step 6 — Global search finds legacy content                         #
+        # ------------------------------------------------------------------ #
+        conn = get_connection(self.db_path)
+        global_results = search_exchanges_global(conn, 'cuda reduction')
+        conn.close()
+        self.assertGreater(len(global_results), 0,
+                           'Global FTS search should find legacy exchange content')
+        texts = [r['user_text'] for r in global_results]
+        self.assertTrue(any('cuda' in (t or '').lower() for t in texts))
 
 
-def test_size_limits():
-    """Test that long messages are properly truncated."""
-    print("\n" + "=" * 60)
-    print("SIZE LIMIT TEST: Truncation of long messages")
-    print("=" * 60)
+# ---------------------------------------------------------------------------
+# TestCrossProjectSearch
+# ---------------------------------------------------------------------------
 
-    plugin_dir = Path(__file__).parent.parent
-    hooks_dir = plugin_dir / 'hooks'
-    scripts_dir = plugin_dir / 'scripts'
+class TestCrossProjectSearch(unittest.TestCase):
+    """Search across different projects."""
 
-    temp_dir = tempfile.mkdtemp()
-    transcript_path = os.path.join(temp_dir, 'transcript.jsonl')
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / 'recall.db'
 
-    original_home = os.environ.get('HOME')
-    test_home = tempfile.mkdtemp()
-    os.environ['HOME'] = test_home
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    try:
-        print(f"\n[1] Creating transcript with LONG messages...")
-        create_test_transcript(transcript_path, include_long_messages=True)
+    def _make_transcript(self, name, pairs):
+        path = str(Path(self.temp_dir) / name)
+        _write_transcript(path, pairs)
+        return path
 
-        with open(transcript_path) as f:
-            lines = f.readlines()
+    def test_cross_project_search(self):
+        import prompt_submit
 
-        # Check original message sizes
-        first_msg = json.loads(lines[0])
-        original_size = len(first_msg['message']['content'][0]['text'])
-        print(f"    Original user message size: {original_size} chars")
+        # Prevent migration from picking up any real legacy index.json
+        original_legacy_file = prompt_submit.LEGACY_INDEX_FILE
+        prompt_submit.LEGACY_INDEX_FILE = Path(self.temp_dir) / 'no-such-index.json'
 
-        print(f"\n[2] Running hook...")
-        hook_input = {
-            "session_id": "test-long-messages",
-            "transcript_path": transcript_path,
-            "user_prompt": "test",
-            "hook_event_name": "UserPromptSubmit"
-        }
+        try:
+            self._run_cross_project(prompt_submit)
+        finally:
+            prompt_submit.LEGACY_INDEX_FILE = original_legacy_file
 
-        result = run_hook(str(hooks_dir), hook_input)
-        if result.returncode != 0:
-            print(f"    FAILED: Hook error: {result.stderr}")
-            return False
+    def _run_cross_project(self, prompt_submit):
+        # ------------------------------------------------------------------ #
+        # Step 1 — prompt_hook() for project A (triton-metal, hash-a)         #
+        # ------------------------------------------------------------------ #
+        transcript_a = self._make_transcript('transcript_a.jsonl', [
+            ('Explain triton reduction kernel.', 'The triton reduction uses tl.sum with a tile.', '2025-01-05T09:00:00Z'),
+        ])
+        prompt_hook(
+            {
+                'session_id': 'sess-proj-a',
+                'transcript_path': transcript_a,
+                'user_prompt': 'hello',
+                'project_path': 'triton-metal',
+                'project_hash': 'hash-a',
+            },
+            db_path=self.db_path,
+        )
 
-        print(f"\n[3] Checking truncation in snapshot...")
-        snapshot_file = Path(test_home) / '.claude' / 'context-recall' / 'current.json'
-        with open(snapshot_file) as f:
-            snapshot = json.load(f)
+        # ------------------------------------------------------------------ #
+        # Step 2 — prompt_hook() for project B (cuda-kernels, hash-b)         #
+        # ------------------------------------------------------------------ #
+        transcript_b = self._make_transcript('transcript_b.jsonl', [
+            ('Show me CUDA reduction code.', 'In CUDA, reduction uses warp shuffle for speed.', '2025-01-05T10:00:00Z'),
+        ])
+        prompt_hook(
+            {
+                'session_id': 'sess-proj-b',
+                'transcript_path': transcript_b,
+                'user_prompt': 'hello',
+                'project_path': 'cuda-kernels',
+                'project_hash': 'hash-b',
+            },
+            db_path=self.db_path,
+        )
 
-        exchanges = snapshot.get('exchanges', [])
-        if not exchanges:
-            print("    FAILED: No exchanges in snapshot")
-            return False
+        # ------------------------------------------------------------------ #
+        # Step 3 — search_exchanges_global() for "reduction" → both projects  #
+        # ------------------------------------------------------------------ #
+        conn = get_connection(self.db_path)
+        global_results = search_exchanges_global(conn, 'reduction')
+        conn.close()
 
-        first_exchange = exchanges[0]
-        truncated_user_size = len(first_exchange['user'])
-        truncated_assistant_size = len(first_exchange['assistant'])
+        self.assertGreaterEqual(len(global_results), 2,
+                                'Global search should find results from both projects')
+        session_ids = {r['session_id'] for r in global_results}
+        self.assertIn('sess-proj-a', session_ids,
+                      'Project A session should appear in global results')
+        self.assertIn('sess-proj-b', session_ids,
+                      'Project B session should appear in global results')
 
-        print(f"    Truncated user message: {truncated_user_size} chars")
-        print(f"    Truncated assistant message: {truncated_assistant_size} chars")
-
-        # Check truncation worked (should be ~1000 + truncation indicator)
-        max_expected = 1050  # 1000 + "[...truncated...]"
-
-        checks = [
-            (truncated_user_size <= max_expected, f"User message truncated to ~1000 chars (got {truncated_user_size})"),
-            (truncated_assistant_size <= max_expected, f"Assistant message truncated to ~1000 chars (got {truncated_assistant_size})"),
-            ("[...truncated...]" in first_exchange['user'], "User message has truncation indicator"),
-            ("[...truncated...]" in first_exchange['assistant'], "Assistant message has truncation indicator"),
-        ]
-
-        all_passed = True
-        for check, description in checks:
-            status = "PASS" if check else "FAIL"
-            print(f"    [{status}] {description}")
-            if not check:
-                all_passed = False
-
-        print(f"\n[4] Checking total size limit...")
-        total_chars = sum(len(e['user']) + len(e['assistant']) for e in exchanges)
-        print(f"    Total characters across all exchanges: {total_chars}")
-
-        if total_chars <= 8500:  # 8000 + some buffer for truncation indicators
-            print(f"    [PASS] Total size within limit")
-        else:
-            print(f"    [FAIL] Total size exceeds limit")
-            all_passed = False
-
-        print("\n" + "=" * 60)
-        if all_passed:
-            print("SIZE LIMIT TEST PASSED")
-        else:
-            print("SIZE LIMIT TEST FAILED")
-        print("=" * 60)
-
-        return all_passed
-
-    finally:
-        # Cleanup
-        os.environ['HOME'] = original_home
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        shutil.rmtree(test_home, ignore_errors=True)
+        # ------------------------------------------------------------------ #
+        # Step 4 — project_path is included in results                        #
+        # ------------------------------------------------------------------ #
+        for result in global_results:
+            self.assertIn('project_path', result,
+                          'Each global search result should include project_path')
+        project_paths = {r['project_path'] for r in global_results}
+        self.assertIn('triton-metal', project_paths)
+        self.assertIn('cuda-kernels', project_paths)
 
 
 if __name__ == '__main__':
-    success1 = test_full_flow()
-    success2 = test_size_limits()
-    sys.exit(0 if (success1 and success2) else 1)
+    unittest.main()
