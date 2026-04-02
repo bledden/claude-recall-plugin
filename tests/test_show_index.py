@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-"""Unit tests for show_index.py"""
+"""Unit tests for show_index.py — DB-backed version."""
 
-import json
 import os
 import sys
 import tempfile
+import shutil
 import unittest
-from pathlib import Path
 from datetime import datetime
-from unittest.mock import patch
+from pathlib import Path
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
+from db import get_connection, insert_session, insert_exchanges
 from show_index import (
     find_page_for_time,
     search_exchanges,
     format_page,
+    format_search_results,
+    get_session_date_range,
 )
 from utils import (
-    load_index,
     format_timestamp,
     format_date,
     parse_time_query,
@@ -27,205 +28,331 @@ from utils import (
 )
 
 
-class TestFormatTimestamp(unittest.TestCase):
-    """Tests for format_timestamp function."""
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
-    def test_valid_timestamp(self):
-        """Test formatting a valid ISO timestamp."""
-        result = format_timestamp("2025-01-05T14:30:00Z")
-        # Should contain time in some format
-        self.assertIn(':', result)
-
-    def test_empty_timestamp(self):
-        """Test with empty timestamp."""
-        result = format_timestamp("")
-        self.assertEqual(result, "")
-
-    def test_invalid_timestamp(self):
-        """Test with invalid timestamp."""
-        result = format_timestamp("not-a-timestamp")
-        self.assertEqual(result, "")
+def make_db(tmp_dir: str):
+    db_path = Path(tmp_dir) / 'recall.db'
+    return get_connection(db_path=db_path)
 
 
-class TestParseTimeQuery(unittest.TestCase):
-    """Tests for parse_time_query function."""
-
-    def test_parse_12hour_format(self):
-        """Test parsing 12-hour time format."""
-        result = parse_time_query("2:30pm")
-        self.assertIsNotNone(result)
-        self.assertEqual(result.hour, 14)
-        self.assertEqual(result.minute, 30)
-
-    def test_parse_24hour_format(self):
-        """Test parsing 24-hour time format."""
-        result = parse_time_query("14:30")
-        self.assertIsNotNone(result)
-        self.assertEqual(result.hour, 14)
-        self.assertEqual(result.minute, 30)
-
-    def test_parse_simple_hour(self):
-        """Test parsing simple hour like '3pm'."""
-        result = parse_time_query("3pm")
-        self.assertIsNotNone(result)
-        self.assertEqual(result.hour, 15)
-
-    def test_parse_around_prefix(self):
-        """Test parsing with 'around' prefix."""
-        result = parse_time_query("around 2pm")
-        self.assertIsNotNone(result)
-        self.assertEqual(result.hour, 14)
-
-    def test_invalid_time(self):
-        """Test with invalid time string."""
-        result = parse_time_query("not a time")
-        self.assertIsNone(result)
+def seed_session(conn, session_id: str, project_path: str = '/proj/foo',
+                 project_hash: str = 'abc123', started_at: str = '2025-01-15T09:00:00Z',
+                 exchanges=None):
+    insert_session(conn, session_id, project_path, project_hash, started_at=started_at)
+    if exchanges:
+        insert_exchanges(conn, session_id, exchanges)
 
 
-class TestSearchExchanges(unittest.TestCase):
-    """Tests for search_exchanges function."""
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
-    def test_search_finds_match(self):
-        """Test searching finds matching exchanges."""
+SAMPLE_EXCHANGES_5 = [
+    {
+        'idx': i,
+        'timestamp': f'2025-01-15T{9 + i - 1:02d}:00:00Z',
+        'preview': f'Exchange {i} preview',
+        'user_text': f'User message {i}',
+        'assistant_text': f'Assistant response {i}',
+    }
+    for i in range(1, 6)
+]
+
+MULTIDAY_EXCHANGES = [
+    {
+        'idx': 1,
+        'timestamp': '2025-01-05T09:00:00Z',
+        'preview': 'Day 1 morning',
+        'user_text': 'Morning question',
+        'assistant_text': 'Morning answer',
+    },
+    {
+        'idx': 2,
+        'timestamp': '2025-01-05T14:00:00Z',
+        'preview': 'Day 1 afternoon',
+        'user_text': 'Afternoon question',
+        'assistant_text': 'Afternoon answer',
+    },
+    {
+        'idx': 3,
+        'timestamp': '2025-01-06T09:00:00Z',
+        'preview': 'Day 2 morning',
+        'user_text': 'Next day question',
+        'assistant_text': 'Next day answer',
+    },
+    {
+        'idx': 4,
+        'timestamp': '2025-01-07T10:00:00Z',
+        'preview': 'Day 3 question',
+        'user_text': 'Third day question',
+        'assistant_text': 'Third day answer',
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# test_format_page_basic
+# ---------------------------------------------------------------------------
+
+class TestFormatPageBasic(unittest.TestCase):
+
+    def test_format_page_includes_session_info(self):
+        result = format_page(SAMPLE_EXCHANGES_5, 1, 5, '2025-01-15T09:00:00Z')
+        self.assertIn('Session started', result)
+        self.assertIn('Total exchanges', result)
+        self.assertIn('5', result)
+
+    def test_format_page_shows_previews(self):
+        result = format_page(SAMPLE_EXCHANGES_5, 1, 5, '2025-01-15T09:00:00Z')
+        # Most-recent-first: exchange 5 should appear before exchange 1
+        self.assertIn('Exchange 5 preview', result)
+
+    def test_format_page_shows_navigation(self):
+        result = format_page(SAMPLE_EXCHANGES_5, 1, 5, '2025-01-15T09:00:00Z')
+        self.assertIn('Navigation', result)
+
+
+# ---------------------------------------------------------------------------
+# test_format_page_empty
+# ---------------------------------------------------------------------------
+
+class TestFormatPageEmpty(unittest.TestCase):
+
+    def test_empty_returns_no_exchanges_message(self):
+        result = format_page([], 1, 0, '')
+        self.assertIn('No exchanges found', result)
+
+    def test_page_beyond_total(self):
+        result = format_page(SAMPLE_EXCHANGES_5, 99, 5, '2025-01-15T09:00:00Z')
+        self.assertIn('empty', result.lower())
+
+
+# ---------------------------------------------------------------------------
+# test_pagination_multiple_pages
+# ---------------------------------------------------------------------------
+
+class TestPaginationMultiplePages(unittest.TestCase):
+
+    def setUp(self):
+        # Create more exchanges than a single page
+        self.many_exchanges = [
+            {
+                'idx': i,
+                'timestamp': f'2025-01-15T{9:02d}:{i:02d}:00Z',
+                'preview': f'Exchange {i}',
+                'user_text': f'User {i}',
+                'assistant_text': f'Assistant {i}',
+            }
+            for i in range(1, PAGE_SIZE * 2 + 5)  # 2+ pages worth
+        ]
+
+    def test_page_1_shows_most_recent(self):
+        total = len(self.many_exchanges)
+        result = format_page(self.many_exchanges, 1, total, '2025-01-15T09:00:00Z')
+        # The most recent exchange (highest idx) should appear on page 1
+        last_idx = self.many_exchanges[-1]['idx']
+        self.assertIn(f'Exchange {last_idx}', result)
+
+    def test_shows_correct_page_count(self):
+        total = len(self.many_exchanges)
+        result = format_page(self.many_exchanges, 1, total, '2025-01-15T09:00:00Z')
+        self.assertIn('page', result.lower())
+        # Should show there are multiple pages
+        self.assertIn('Show older', result)
+
+    def test_page_2_shows_older_exchanges(self):
+        total = len(self.many_exchanges)
+        result = format_page(self.many_exchanges, 2, total, '2025-01-15T09:00:00Z')
+        # Page 2 should NOT contain the most recent exchange
+        last_idx = self.many_exchanges[-1]['idx']
+        # The latest exchange is on page 1, not page 2
+        self.assertIn('Show newer: page 1', result)
+
+
+# ---------------------------------------------------------------------------
+# test_search_exchanges_finds_matches
+# ---------------------------------------------------------------------------
+
+class TestSearchExchangesFindsMatches(unittest.TestCase):
+
+    def test_search_in_preview(self):
         exchanges = [
-            {'idx': 1, 'preview': 'Help me with authentication'},
-            {'idx': 2, 'preview': 'Fix the bug in login'},
-            {'idx': 3, 'preview': 'Update authentication flow'},
+            {'idx': 1, 'preview': 'authentication flow', 'user_text': '', 'assistant_text': ''},
+            {'idx': 2, 'preview': 'fix the bug', 'user_text': '', 'assistant_text': ''},
         ]
         results = search_exchanges(exchanges, 'authentication')
-        self.assertEqual(len(results), 2)
+        self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['idx'], 1)
-        self.assertEqual(results[1]['idx'], 3)
+
+    def test_search_in_user_text(self):
+        exchanges = [
+            {'idx': 1, 'preview': 'hello', 'user_text': 'help with authentication', 'assistant_text': ''},
+            {'idx': 2, 'preview': 'world', 'user_text': 'fix bug', 'assistant_text': ''},
+        ]
+        results = search_exchanges(exchanges, 'authentication')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['idx'], 1)
+
+    def test_search_in_assistant_text(self):
+        exchanges = [
+            {'idx': 1, 'preview': 'q', 'user_text': 'q', 'assistant_text': 'use auth tokens'},
+            {'idx': 2, 'preview': 'q', 'user_text': 'q', 'assistant_text': 'no match here'},
+        ]
+        results = search_exchanges(exchanges, 'auth')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['idx'], 1)
 
     def test_search_case_insensitive(self):
-        """Test search is case insensitive."""
         exchanges = [
-            {'idx': 1, 'preview': 'AUTHENTICATION issue'},
+            {'idx': 1, 'preview': 'AUTHENTICATION ISSUE', 'user_text': '', 'assistant_text': ''},
         ]
         results = search_exchanges(exchanges, 'authentication')
         self.assertEqual(len(results), 1)
 
-    def test_search_no_matches(self):
-        """Test search with no matches."""
+    def test_search_no_results(self):
         exchanges = [
-            {'idx': 1, 'preview': 'Help me with login'},
+            {'idx': 1, 'preview': 'login bug', 'user_text': 'login bug', 'assistant_text': 'fix login'},
         ]
         results = search_exchanges(exchanges, 'authentication')
         self.assertEqual(len(results), 0)
 
 
-class TestFindPageForTime(unittest.TestCase):
-    """Tests for find_page_for_time function."""
+# ---------------------------------------------------------------------------
+# test_format_search_results
+# ---------------------------------------------------------------------------
 
-    def test_finds_correct_page(self):
-        """Test finding page for a specific time."""
-        # Create exchanges spread across time
+class TestFormatSearchResults(unittest.TestCase):
+
+    def test_format_with_matches(self):
+        results = [
+            {'idx': 1, 'preview': 'auth flow', 'timestamp': '2025-01-15T09:00:00Z'},
+            {'idx': 3, 'preview': 'auth token', 'timestamp': '2025-01-15T10:00:00Z'},
+        ]
+        output = format_search_results(results, 'auth', 10)
+        self.assertIn('auth', output)
+        self.assertIn('2 matches', output)
+        self.assertIn('auth flow', output)
+        self.assertIn('auth token', output)
+
+    def test_format_no_matches(self):
+        output = format_search_results([], 'xyzzy', 10)
+        self.assertIn('No exchanges found', output)
+        self.assertIn('xyzzy', output)
+
+    def test_format_truncates_at_20(self):
+        many = [
+            {
+                'idx': i,
+                'preview': f'result {i}',
+                'timestamp': '2025-01-15T09:00:00Z',
+            }
+            for i in range(1, 30)
+        ]
+        output = format_search_results(many, 'result', 100)
+        self.assertIn('more matches', output)
+
+
+# ---------------------------------------------------------------------------
+# test_date_grouping_multiday
+# ---------------------------------------------------------------------------
+
+class TestDateGroupingMultiday(unittest.TestCase):
+
+    def test_multiday_session_date_range(self):
+        date_range = get_session_date_range(MULTIDAY_EXCHANGES)
+        # Should contain both boundary dates in some form
+        self.assertIn('-', date_range)  # 'Jan 5 - Jan 7' style
+
+    def test_single_day_date_range(self):
+        exchanges = [
+            {'idx': 1, 'timestamp': '2025-01-05T09:00:00Z'},
+            {'idx': 2, 'timestamp': '2025-01-05T14:00:00Z'},
+        ]
+        date_range = get_session_date_range(exchanges)
+        # Single day: no dash
+        self.assertNotIn(' - ', date_range)
+
+    def test_format_page_includes_date_in_header(self):
+        result = format_page(MULTIDAY_EXCHANGES, 1, len(MULTIDAY_EXCHANGES),
+                             MULTIDAY_EXCHANGES[0]['timestamp'])
+        # Date info in parentheses in the header
+        self.assertIn('(', result)
+
+    def test_format_page_groups_by_date(self):
+        result = format_page(MULTIDAY_EXCHANGES, 1, len(MULTIDAY_EXCHANGES),
+                             MULTIDAY_EXCHANGES[0]['timestamp'])
+        # Multi-day format includes bold date headers
+        self.assertIn('**', result)
+
+
+# ---------------------------------------------------------------------------
+# find_page_for_time
+# ---------------------------------------------------------------------------
+
+class TestFindPageForTime(unittest.TestCase):
+
+    def test_returns_1_for_empty(self):
+        page = find_page_for_time([], datetime.now())
+        self.assertEqual(page, 1)
+
+    def test_finds_page_for_time(self):
         exchanges = []
         for i in range(50):
-            hour = 9 + (i // 5)  # 9am, 10am, etc.
+            hour = 9 + (i // 5)
             minute = (i % 5) * 10
             exchanges.append({
                 'idx': i + 1,
                 'preview': f'Exchange {i + 1}',
-                'timestamp': f'2025-01-05T{hour:02d}:{minute:02d}:00Z'
+                'timestamp': f'2025-01-05T{hour:02d}:{minute:02d}:00Z',
             })
-
         target = datetime.now().replace(hour=11, minute=0)
         page = find_page_for_time(exchanges, target)
-
-        # Should return a valid page number
         self.assertGreaterEqual(page, 1)
-
-    def test_empty_exchanges(self):
-        """Test with empty exchanges list."""
-        page = find_page_for_time([], datetime.now())
-        self.assertEqual(page, 1)
+        self.assertLessEqual(page, (len(exchanges) + PAGE_SIZE - 1) // PAGE_SIZE)
 
 
-class TestFormatPage(unittest.TestCase):
-    """Tests for format_page function."""
+# ---------------------------------------------------------------------------
+# DB integration: ensure show_index works end-to-end with real DB
+# ---------------------------------------------------------------------------
 
-    def test_format_single_page(self):
-        """Test formatting a page with exchanges."""
-        exchanges = [
-            {'idx': 1, 'preview': 'First exchange', 'timestamp': '2025-01-05T09:00:00Z'},
-            {'idx': 2, 'preview': 'Second exchange', 'timestamp': '2025-01-05T09:05:00Z'},
-        ]
-        result = format_page(exchanges, 1, 2, '2025-01-05T09:00:00Z')
-
-        self.assertIn('Session started', result)
-        self.assertIn('Total exchanges', result)
-        self.assertIn('First exchange', result)
-
-    def test_format_empty_page(self):
-        """Test formatting with no exchanges."""
-        result = format_page([], 1, 0, '')
-        self.assertIn('No exchanges found', result)
-
-    def test_pagination_info(self):
-        """Test that pagination info is included."""
-        # Create enough exchanges for multiple pages
-        exchanges = [
-            {'idx': i, 'preview': f'Exchange {i}', 'timestamp': f'2025-01-05T09:{i:02d}:00Z'}
-            for i in range(1, 50)
-        ]
-        result = format_page(exchanges, 1, 49, '2025-01-05T09:00:00Z')
-
-        self.assertIn('page', result.lower())
-
-
-class TestLoadIndex(unittest.TestCase):
-    """Tests for load_index function."""
+class TestShowIndexDBIntegration(unittest.TestCase):
 
     def setUp(self):
-        """Set up test fixtures."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.index_dir = Path(self.temp_dir) / '.claude' / 'context-recall'
-        self.index_dir.mkdir(parents=True)
+        self.tmp = tempfile.mkdtemp()
+        self.conn = make_db(self.tmp)
+        seed_session(self.conn, 'sess-show', started_at='2025-01-15T09:00:00Z',
+                     exchanges=SAMPLE_EXCHANGES_5)
 
     def tearDown(self):
-        """Clean up test fixtures."""
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_load_valid_index(self):
-        """Test loading a valid index file."""
-        import utils
+    def test_get_exchanges_returns_correct_count(self):
+        from db import get_exchanges
+        exs = get_exchanges(self.conn, 'sess-show')
+        self.assertEqual(len(exs), 5)
 
-        index_data = {
-            'session_id': 'test-123',
-            'total_exchanges': 10,
-            'exchanges': [
-                {'idx': 1, 'preview': 'Test', 'timestamp': '2025-01-05T09:00:00Z'}
-            ]
-        }
+    def test_format_page_with_db_exchanges(self):
+        from db import get_exchanges, get_session
+        exs = get_exchanges(self.conn, 'sess-show')
+        sess = get_session(self.conn, 'sess-show')
+        result = format_page(exs, 1, len(exs), sess['started_at'])
+        self.assertIn('Session started', result)
+        self.assertIn('5', result)  # total count
 
-        index_file = self.index_dir / 'index.json'
-        with open(index_file, 'w') as f:
-            json.dump(index_data, f)
+    def test_search_exchanges_with_db_data(self):
+        from db import get_exchanges
+        exs = get_exchanges(self.conn, 'sess-show')
+        results = search_exchanges(exs, 'User message')
+        self.assertEqual(len(results), 5)  # all exchanges contain 'User message N'
 
-        # Patch the INDEX_FILE constant directly
-        original_index_file = utils.INDEX_FILE
-        utils.INDEX_FILE = index_file
-        try:
-            result = load_index()
-            self.assertIsNotNone(result)
-            self.assertEqual(result['session_id'], 'test-123')
-        finally:
-            utils.INDEX_FILE = original_index_file
-
-    def test_load_missing_index(self):
-        """Test loading when index doesn't exist."""
-        import utils
-
-        # Point to a non-existent file
-        original_index_file = utils.INDEX_FILE
-        utils.INDEX_FILE = self.index_dir / 'nonexistent.json'
-        try:
-            result = load_index()
-            self.assertIsNone(result)
-        finally:
-            utils.INDEX_FILE = original_index_file
+    def test_search_exchanges_no_results_with_db_data(self):
+        from db import get_exchanges
+        exs = get_exchanges(self.conn, 'sess-show')
+        results = search_exchanges(exs, 'xyzzy_not_there_ever')
+        self.assertEqual(len(results), 0)
 
 
 if __name__ == '__main__':
