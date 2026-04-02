@@ -190,7 +190,10 @@ def inbox(conn, watcher_session: str) -> str:
 # Config
 # ---------------------------------------------------------------------------
 
-VALID_CONFIG_KEYS = {'check_mode', 'delivery_mode', 'auto_highlight'}
+VALID_CONFIG_KEYS = {
+    'check_mode', 'delivery_mode', 'auto_highlight',
+    'skill_enabled', 'detection_signals', 'auto_run_highlight',
+}
 
 
 def config(conn, session_id: str, key: str, value: str) -> str:
@@ -225,16 +228,21 @@ def config(conn, session_id: str, key: str, value: str) -> str:
         return (f"*Config updated: {key} = '{value}' "
                 f"on {count} connection{'s' if count != 1 else ''}.*")
 
-    # auto_highlight — store as bool in session metadata
-    if value.lower() in ('true', '1', 'yes'):
-        parsed_value = True
-    elif value.lower() in ('false', '0', 'no'):
-        parsed_value = False
-    else:
-        parsed_value = value
+    # Session metadata keys
+    bool_keys = {'auto_highlight', 'skill_enabled', 'auto_run_highlight'}
+    if key in bool_keys:
+        if value.lower() in ('true', '1', 'yes'):
+            parsed_value = True
+        elif value.lower() in ('false', '0', 'no'):
+            parsed_value = False
+        else:
+            parsed_value = value
+        set_session_config(conn, session_id, key, parsed_value)
+        return f"*Config updated: {key} = {parsed_value}.*"
 
-    set_session_config(conn, session_id, key, parsed_value)
-    return f"*Config updated: {key} = {parsed_value}.*"
+    # String metadata keys (e.g., detection_signals)
+    set_session_config(conn, session_id, key, value)
+    return f"*Config updated: {key} = '{value}'.*"
 
 
 # ---------------------------------------------------------------------------
