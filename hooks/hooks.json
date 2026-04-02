@@ -1,5 +1,5 @@
 {
-  "description": "Context recall hooks - saves context snapshots and logs recall events",
+  "description": "Recall hooks - indexes conversations, nudges after compaction, finalizes sessions",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -7,8 +7,32 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/save_context_snapshot.py",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/prompt_submit.py",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post_compact.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_end.py",
+            "timeout": 5
           }
         ]
       }
