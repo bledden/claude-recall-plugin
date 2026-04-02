@@ -173,36 +173,36 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = get_connection()
+    try:
+        if args.command == 'list':
+            project_hash = getattr(args, 'project_hash', None)
+            project_path_contains = getattr(args, 'project', None)
+            sessions = list_sessions(
+                conn,
+                project_hash=project_hash,
+                project_path_contains=project_path_contains,
+            )
+            session_ids = [s['session_id'] for s in sessions]
+            tags_by_session = get_tags_by_session(conn, session_ids)
+            print(format_session_list(sessions, tags_by_session))
 
-    if args.command == 'list':
-        project_hash = getattr(args, 'project_hash', None)
-        project_path_contains = getattr(args, 'project', None)
-        sessions = list_sessions(
-            conn,
-            project_hash=project_hash,
-            project_path_contains=project_path_contains,
-        )
-        session_ids = [s['session_id'] for s in sessions]
-        tags_by_session = get_tags_by_session(conn, session_ids)
-        print(format_session_list(sessions, tags_by_session))
+        elif args.command == 'prune':
+            if args.session:
+                prune_session(conn, args.session)
+                print(f"Session '{args.session}' pruned.")
+            elif args.before:
+                count = prune_before_date(conn, args.before)
+                print(f'{count} session(s) pruned before {args.before}.')
 
-    elif args.command == 'prune':
-        if args.session:
-            prune_session(conn, args.session)
-            print(f"Session '{args.session}' pruned.")
-        elif args.before:
-            count = prune_before_date(conn, args.before)
-            print(f'{count} session(s) pruned before {args.before}.')
+        elif args.command == 'export':
+            data = export_session_json(conn, args.session)
+            print(format_export(data))
 
-    elif args.command == 'export':
-        data = export_session_json(conn, args.session)
-        print(format_export(data))
-
-    elif args.command == 'stats':
-        stats = get_stats(conn)
-        print(format_stats(stats))
-
-    conn.close()
+        elif args.command == 'stats':
+            stats = get_stats(conn)
+            print(format_stats(stats))
+    finally:
+        conn.close()
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ to avoid code duplication.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -99,7 +99,7 @@ def parse_date_time_query(time_str: str, reference_dates: List[str] = None) -> O
     # Check for relative date keywords
     target_date = None
     if 'yesterday' in time_str:
-        target_date = datetime.now().date() - __import__('datetime').timedelta(days=1)
+        target_date = datetime.now().date() - timedelta(days=1)
         time_str = time_str.replace('yesterday', '').strip()
     elif 'today' in time_str:
         target_date = datetime.now().date()

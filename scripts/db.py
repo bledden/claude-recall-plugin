@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS tags (
     UNIQUE(tag, session_id, exchange_idx)
 );
 
+-- IMPORTANT: The FTS5 table uses external content (no triggers).
+-- All exchange inserts/deletes MUST go through insert_exchanges() / _delete_fts_rows().
+-- Direct modifications to the exchanges table will corrupt the FTS index.
 CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
     user_text, assistant_text, preview,
     content=exchanges, content_rowid=id
@@ -397,11 +400,9 @@ def search_exchanges_global(conn: sqlite3.Connection, query: str,
 # Maintenance
 # ---------------------------------------------------------------------------
 
-def prune_session(conn: sqlite3.Connection, session_id: str) -> None:
-    """Delete a session, its exchanges (including FTS entries), tags, highlights, and connections."""
-    # Remove FTS entries BEFORE deleting exchanges (needs column values)
+def _prune_session_no_commit(conn: sqlite3.Connection, session_id: str) -> None:
+    """Delete a session's data without committing. Caller owns the transaction."""
     _delete_fts_rows(conn, session_id)
-
     conn.execute("DELETE FROM tags WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM highlights WHERE session_id = ?", (session_id,))
     conn.execute(
@@ -410,11 +411,16 @@ def prune_session(conn: sqlite3.Connection, session_id: str) -> None:
     )
     conn.execute("DELETE FROM exchanges WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+
+def prune_session(conn: sqlite3.Connection, session_id: str) -> None:
+    """Delete a session, its exchanges (including FTS entries), tags, highlights, and connections."""
+    _prune_session_no_commit(conn, session_id)
     conn.commit()
 
 
 def prune_before_date(conn: sqlite3.Connection, before_date: str) -> int:
-    """Delete all sessions started before the given ISO date string.
+    """Delete all sessions started before the given ISO date string. Atomic.
 
     Returns:
         Number of sessions deleted.
@@ -424,7 +430,8 @@ def prune_before_date(conn: sqlite3.Connection, before_date: str) -> int:
     )
     session_ids = [row['session_id'] for row in cur.fetchall()]
     for sid in session_ids:
-        prune_session(conn, sid)
+        _prune_session_no_commit(conn, sid)
+    conn.commit()
     return len(session_ids)
 
 

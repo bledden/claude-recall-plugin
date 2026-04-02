@@ -216,11 +216,14 @@ def config(conn, session_id: str, key: str, value: str) -> str:
         valid = ', '.join(sorted(VALID_CONFIG_KEYS))
         return f"*Error: invalid config key '{key}'. Valid keys: {valid}.*"
 
-    if key in ('check_mode', 'delivery_mode'):
+    # Connection-level keys — update all connections for this watcher
+    _COLUMN_SAFE = {'check_mode': 'check_mode', 'delivery_mode': 'delivery_mode'}
+    if key in _COLUMN_SAFE:
+        col = _COLUMN_SAFE[key]
         connections = get_connections(conn, session_id)
         for c in connections:
             conn.execute(
-                f"UPDATE connections SET {key} = ? WHERE id = ?",
+                f"UPDATE connections SET {col} = ? WHERE id = ?",
                 (value, c['id']),
             )
         conn.commit()

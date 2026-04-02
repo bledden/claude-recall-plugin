@@ -182,28 +182,28 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = get_connection()
+    try:
+        if args.command == 'add':
+            add_tag(conn, args.tag, args.session_id, exchange_idx=args.exchange_idx)
+            scope = f' (exchange {args.exchange_idx})' if args.exchange_idx is not None else ''
+            print(f"Tag '{args.tag}' added to session {args.session_id}{scope}.")
 
-    if args.command == 'add':
-        add_tag(conn, args.tag, args.session_id, exchange_idx=args.exchange_idx)
-        scope = f' (exchange {args.exchange_idx})' if args.exchange_idx is not None else ''
-        print(f"Tag '{args.tag}' added to session {args.session_id}{scope}.")
+        elif args.command == 'list':
+            tags = list_tags(conn, project_hash=args.project)
+            print(format_tag_list(tags))
 
-    elif args.command == 'list':
-        tags = list_tags(conn, project_hash=args.project)
-        print(format_tag_list(tags))
-
-    elif args.command == 'search':
-        results = search_by_tag(conn, args.tag)
-        if not results:
-            print(f"No sessions found with tag '{args.tag}'.")
-        else:
-            for r in results:
-                print(
-                    f"  {r['session_id']}  project={r['project_path']}  "
-                    f"started={r['session_started']}"
-                )
-
-    conn.close()
+        elif args.command == 'search':
+            results = search_by_tag(conn, args.tag)
+            if not results:
+                print(f"No sessions found with tag '{args.tag}'.")
+            else:
+                for r in results:
+                    print(
+                        f"  {r['session_id']}  project={r['project_path']}  "
+                        f"started={r['session_started']}"
+                    )
+    finally:
+        conn.close()
 
 
 if __name__ == '__main__':
