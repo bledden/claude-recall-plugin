@@ -69,7 +69,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
     content=exchanges, content_rowid=id
 );
 
-CREATE INDEX IF NOT EXISTS idx_exchanges_session ON exchanges(session_id);
+-- Note: exchanges(session_id, idx) is already covered by the UNIQUE constraint.
 CREATE INDEX IF NOT EXISTS idx_tags_session ON tags(session_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_hash);
@@ -135,7 +135,16 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout={}".format(DB_BUSY_TIMEOUT_MS))
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(_SCHEMA_SQL)
+    conn.execute("PRAGMA synchronous = NORMAL")
+
+    # Only run schema DDL if tables don't exist yet (avoids parsing 15 DDL
+    # statements on every connection — saves ~2ms per prompt)
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+    ).fetchone()
+    if row is None:
+        conn.executescript(_SCHEMA_SQL)
+
     return conn
 
 # ---------------------------------------------------------------------------

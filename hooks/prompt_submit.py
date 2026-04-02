@@ -389,35 +389,26 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
             current_size = os.path.getsize(transcript_path)
 
         new_exchanges_list: List[Dict] = []
+        existing_count = session['exchange_count'] or 0 if session else 0
 
         if current_size > byte_offset:
             new_messages, new_offset = parse_transcript_from_offset(transcript_path, byte_offset)
 
             if new_messages:
-                # Determine start index from existing exchanges
-                existing = get_exchanges(conn, session_id)
-                start_idx = len(existing) + 1
-
+                start_idx = existing_count + 1
                 new_exchanges_list = build_new_exchanges(new_messages, start_idx)
 
                 if new_exchanges_list:
                     insert_exchanges(conn, session_id, new_exchanges_list)
 
-                total_count = len(existing) + len(new_exchanges_list)
+                total_count = existing_count + len(new_exchanges_list)
                 update_session_offset(conn, session_id, new_offset, total_count)
             else:
-                # File grew but no complete messages yet — still advance offset
-                update_session_offset(
-                    conn,
-                    session_id,
-                    new_offset,
-                    session['exchange_count'] if session else 0,
-                )
+                update_session_offset(conn, session_id, new_offset, existing_count)
 
-        # Auto-tag and auto-detect highlights only when there are new exchanges
-        all_exchanges = get_exchanges(conn, session_id)
+        # Auto-tag and auto-detect only on new exchanges (incremental, not full scan)
         if new_exchanges_list:
-            _store_auto_tags(conn, session_id, all_exchanges)
+            _store_auto_tags(conn, session_id, new_exchanges_list)
             auto_detect_highlights(conn, session_id, new_exchanges_list)
 
         # Check connections for incoming highlights
@@ -425,7 +416,8 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
 
         # Handle /recall
         if user_prompt.strip().lower().startswith('/recall'):
-            exchange_count = len(all_exchanges)
+            updated = get_session(conn, session_id)
+            exchange_count = updated['exchange_count'] or 0 if updated else 0
             log_recall_event(session_id, exchange_count)
             return {
                 "systemMessage": f"[Observability] Context recall logged at exchange #{exchange_count}"
