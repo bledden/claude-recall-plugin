@@ -1,10 +1,8 @@
-# Claude Recall Plugin v2.1.0
+# Claude Recall Plugin v2.2.0
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events — with cross-session search, tagging, cross-session highlight sharing, and observability.
 
-> **Marketplace Status:** This plugin has been submitted to the official Claude Code plugins repository and is awaiting approval.
->
-> **PR:** [anthropics/claude-code#16680](https://github.com/anthropics/claude-code/pull/16680)
+> **Marketplace Status:** Submitted via the official submission form at [claude.ai/settings/plugins/submit](https://claude.ai/settings/plugins/submit).
 >
 > **Pre-built Marketplace:** [claude-recall-marketplace](https://github.com/bledden/claude-recall-marketplace) (for easy installation until approved)
 
@@ -211,6 +209,9 @@ This will:
 /recall config check_mode decay          Enable decay-based polling (default: explicit)
 /recall config delivery_mode inject      Auto-inject highlights as system messages (default: silent)
 /recall config auto_highlight true       Enable heuristic highlight detection (default: false)
+/recall config skill_enabled true        Enable the recall-assistant skill (default: false)
+/recall config detection_signals explicit,behavioral,temporal   Configure context-loss detection signals
+/recall config auto_run_highlight true   Auto-flag findings without asking (default: false)
 ```
 
 ### Maintenance
@@ -296,15 +297,27 @@ By default, connections are `check_mode=explicit` — highlights only appear whe
 /recall inbox
 ```
 
-### 7. Concurrent Session Safety
+### 7. Recall Assistant Skill (Opt-In)
+
+An optional skill that teaches Claude to proactively use the recall plugin. Enable with `/recall config skill_enabled true`.
+
+When enabled, Claude will:
+- **Detect context loss** — recognizes when it's lost earlier conversation context (explicit signals like "didn't we already...", behavioral signals like contradicting itself, temporal signals like post-compaction)
+- **Suggest highlighting** — when Claude produces a transferable finding, it suggests `/recall highlight` (or auto-runs it if `auto_run_highlight` is enabled)
+- **Translate natural language** — "keep an eye on session abc123" becomes `/recall connect abc123 "..."`
+- **Suggest inbox checks** — when working on topics that overlap with connected sessions
+
+The skill is fully opt-in and respects all existing opt-in gates. It never auto-runs connect, disconnect, or inbox commands.
+
+### 8. Concurrent Session Safety
 
 Multiple Claude sessions in the same project write to the same database without conflicts. SQLite WAL mode allows concurrent reads and serializes writes safely.
 
-### 8. SQLite Storage
+### 9. SQLite Storage
 
 All context is stored in a single SQLite database (`recall.db`) with FTS5 for full-text search. No JSON files, no external dependencies beyond Python's built-in `sqlite3` module.
 
-### 9. Timestamped Conversation Index
+### 10. Timestamped Conversation Index
 
 Every exchange is indexed with its timestamp:
 
@@ -322,7 +335,7 @@ Jan 6:
 #115 [1:33 pm] "It looks like the experiment is complete..."
 ```
 
-### 10. Full-Content Search
+### 11. Full-Content Search
 
 Search looks in both user prompts and assistant responses, not just preview text. Multi-word queries use AND logic — both terms must appear anywhere in the exchange. Force exact phrase matching by quoting: `search "the fix is"`.
 
@@ -333,7 +346,7 @@ Search looks in both user prompts and assistant responses, not just preview text
 
 Results show up to 10 most recent matches, grouped by date.
 
-### 11. Observability Logging
+### 12. Observability Logging
 
 Every `/recall` invocation is logged:
 
@@ -346,7 +359,7 @@ Log format:
 2026-01-05T16:45:00+00:00 | session=abc123 | exchanges=72 | CONTEXT_RECALL_TRIGGERED
 ```
 
-### 12. Pagination
+### 13. Pagination
 
 Long sessions are paginated (20 exchanges per page):
 
@@ -498,32 +511,52 @@ wc -l ~/.claude/recall-events.log
 ```
 claude-recall-plugin/
 ├── .claude-plugin/
-│   └── plugin.json              # Plugin metadata
+│   └── plugin.json                  # Plugin metadata (v2.2.0)
 ├── commands/
-│   └── recall.md                # The /recall command definition
+│   └── recall.md                    # The /recall command definition
+├── skills/
+│   └── recall-assistant/
+│       └── SKILL.md                 # Proactive recall assistant skill
 ├── hooks/
-│   ├── hooks.json               # Hook configuration (UserPromptSubmit, PostCompact, SessionEnd)
-│   └── save_context_snapshot.py # Incremental indexer + migration
+│   ├── hooks.json                   # Hook config (UserPromptSubmit, PostCompact, SessionEnd)
+│   ├── prompt_submit.py             # Incremental indexer + auto-tagging + connection checks
+│   ├── post_compact.py              # Context recovery nudge
+│   └── session_end.py               # Session finalization
 ├── scripts/
-│   ├── utils.py                 # Shared utilities
-│   ├── db.py                    # SQLite layer (FTS5, WAL, migrations, highlights, connections)
-│   ├── show_index.py            # Paginated index display
-│   ├── fetch_exchanges.py       # Fetch exchanges by query
-│   ├── search.py                # Cross-session/project search
-│   ├── sessions.py              # Session list, browse, prune, export
-│   ├── tags.py                  # Tag management
-│   ├── highlight.py             # Highlight creation (explicit + auto-detection)
-│   └── manage_connections.py    # Connect, disconnect, inbox, config
-└── tests/
-    ├── test_utils.py
-    ├── test_fetch_exchanges.py
-    ├── test_show_index.py
-    ├── test_save_context_snapshot.py
-    ├── test_db.py
-    ├── test_search.py
-    ├── test_tags.py
-    ├── test_highlight.py
-    └── test_manage_connections.py
+│   ├── db.py                        # SQLite layer (FTS5, WAL, all CRUD)
+│   ├── utils.py                     # Shared formatting and parsing utilities
+│   ├── auto_tagger.py               # TF-based keyword extraction
+│   ├── highlight.py                 # Highlight creation (explicit + auto-detect)
+│   ├── manage_connections.py        # Connect, disconnect, inbox, config
+│   ├── manage_tags.py               # Tag CRUD, search by tag
+│   ├── manage_sessions.py           # Session list, prune, export, stats
+│   ├── fetch_exchanges.py           # Fetch exchanges by query
+│   └── show_index.py                # Paginated index display
+├── tests/
+│   ├── test_db.py                   # Schema, CRUD, FTS5, maintenance (43 tests)
+│   ├── test_auto_tagger.py          # TF extraction, heuristic (13 tests)
+│   ├── test_prompt_submit.py        # Hook behavior, migration (13 tests)
+│   ├── test_post_compact.py         # Nudge generation (7 tests)
+│   ├── test_session_end.py          # Session finalization (3 tests)
+│   ├── test_fetch_exchanges.py      # Query scripts (25 tests)
+│   ├── test_show_index.py           # Pagination, search (26 tests)
+│   ├── test_manage_tags.py          # Tag management (14 tests)
+│   ├── test_manage_sessions.py      # Session management (16 tests)
+│   ├── test_manage_connections.py   # Connection management (15 tests)
+│   ├── test_highlight.py            # Highlight creation (19 tests)
+│   ├── integration_test.py          # Full lifecycle, migration, cross-project (4 tests)
+│   ├── eval_skill_defaults.py       # Skill config and SKILL.md verification (50 tests)
+│   ├── stress_test_scale.py         # Scale: 5000 exchanges, FTS5 timing (22 tests)
+│   ├── stress_test_concurrent.py    # Concurrent: 5 threads, WAL validation (6 tests)
+│   ├── stress_test_clear.py         # /clear cycles: 20 rapid clears (22 tests)
+│   └── stress_test_sharing.py       # Sharing: highlights, decay, inbox (22 tests)
+├── docs/
+│   └── superpowers/
+│       ├── specs/                   # Design specifications
+│       └── plans/                   # Implementation plans
+├── README.md
+├── LICENSE
+└── .gitignore
 ```
 
 ---
@@ -532,7 +565,15 @@ claude-recall-plugin/
 
 ```bash
 cd claude-recall-plugin
-python3 -m unittest discover -v tests/
+
+# Unit and integration tests (226 tests)
+python3 -m pytest tests/ -v
+
+# Stress tests (72 tests)
+python3 -m pytest tests/stress_test_*.py -v
+
+# All tests (298 total)
+python3 -m pytest tests/ tests/stress_test_*.py -v
 ```
 
 ---
@@ -541,7 +582,7 @@ python3 -m unittest discover -v tests/
 
 1. Fork the repository
 2. Make your changes
-3. Run tests: `python3 -m unittest discover -v tests/`
+3. Run tests: `python3 -m pytest tests/ -v`
 4. Submit a pull request
 
 ---
@@ -574,6 +615,16 @@ rm -rf ~/.claude/context-recall/
 ---
 
 ## Changelog
+
+### 2.2.0 (April 2026)
+- Recall assistant skill: opt-in SKILL.md for proactive context recovery, highlight suggestions, and natural language session linking
+- New config keys: `skill_enabled`, `detection_signals`, `auto_run_highlight`
+- Performance: batch commits (10-15 fsyncs → 1 per prompt), schema init guard, PRAGMA synchronous=NORMAL
+- Performance: incremental auto-tagging (O(new exchanges) instead of O(all exchanges))
+- Security: error messages no longer leak raw exceptions, transcript reads capped at 10MB
+- Security: LIKE wildcards escaped, stdin reads bounded, DB directory permissions restricted
+- Quality: full type annotations, narrow exception handling, empty query guards
+- 298 tests total (226 unit/integration + 72 stress)
 
 ### 2.1.0 (April 2026)
 - Cross-session context sharing via highlights and connections
