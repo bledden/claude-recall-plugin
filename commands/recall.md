@@ -26,7 +26,7 @@ The user wants to recover context from this conversation.
 - `session <id> <args>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session <id> <args>`
 - `tag <name>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py add <name> $SESSION_ID`
 - `tag <name> #<exchange>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py add <name> $SESSION_ID <exchange>`
-- `tags` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py list $SESSION_HASH`
+- `tags` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py list --project $SESSION_HASH`
 - `stats` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py stats`
 - `prune --session <id>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py prune --session <id>`
 - `prune --before <date>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py prune --before <date>`
@@ -89,7 +89,7 @@ If `$ARGUMENTS` was provided, skip the menu and fetch directly:
 - `/recall around 2pm` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $SESSION_ID around 2pm`
 - `/recall search auth` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $SESSION_ID search auth`
 - `/recall sessions` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py list $SESSION_HASH`
-- `/recall tags` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py list $SESSION_HASH`
+- `/recall tags` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py list --project $SESSION_HASH`
 - `/recall stats` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py stats`
 
 Run the appropriate script based on `$ARGUMENTS` as described in Step 1.

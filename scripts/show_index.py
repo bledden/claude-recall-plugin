@@ -252,40 +252,40 @@ def main():
         return
 
     conn = get_connection()
-
-    session = get_session(conn, session_id)
-    if session is None:
-        print(f"*Session '{session_id}' not found in database.*")
-        conn.close()
-        return
-
-    exchanges = get_exchanges(conn, session_id)
-    conn.close()
-
-    total_exchanges = len(exchanges)
-    session_start = session.get('started_at', '')
-
-    if not exchanges:
-        print("*No exchanges found in the current session.*")
-        return
-
-    # Handle search
-    if args.search:
-        results = search_exchanges(exchanges, args.search)
-        print(format_search_results(results, args.search, total_exchanges))
-        return
-
-    # Handle time-based navigation
-    page = args.page
-    if args.around:
-        target_time = parse_time_query(args.around)
-        if target_time:
-            page = find_page_for_time(exchanges, target_time)
-        else:
-            print(f"*Could not parse time: {args.around}. Try formats like '2:30pm' or '14:30'*")
+    try:
+        session = get_session(conn, session_id)
+        if session is None:
+            print(f"*Session '{session_id}' not found in database.*")
             return
 
-    print(format_page(exchanges, page, total_exchanges, session_start))
+        exchanges = get_exchanges(conn, session_id)
+
+        total_exchanges = len(exchanges)
+        session_start = session.get('started_at', '')
+
+        if not exchanges:
+            print("*No exchanges found in the current session.*")
+            return
+
+        # Handle search
+        if args.search:
+            results = search_exchanges(exchanges, args.search)
+            print(format_search_results(results, args.search, total_exchanges))
+            return
+
+        # Handle time-based navigation
+        page = args.page
+        if args.around:
+            target_time = parse_time_query(args.around)
+            if target_time:
+                page = find_page_for_time(exchanges, target_time)
+            else:
+                print(f"*Could not parse time: {args.around}. Try formats like '2:30pm' or '14:30'*")
+                return
+
+        print(format_page(exchanges, page, total_exchanges, session_start))
+    finally:
+        conn.close()
 
 
 if __name__ == '__main__':

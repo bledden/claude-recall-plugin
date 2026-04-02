@@ -256,194 +256,181 @@ def main():
 
     # Open DB connection
     conn = get_connection()
+    try:
+        command = (args.command or 'last5').lower()
+        rest = args.rest or []
 
-    command = (args.command or 'last5').lower()
-    rest = args.rest or []
-
-    # ------------------------------------------------------------------
-    # Handle tag search — independent of session scope
-    # ------------------------------------------------------------------
-    if args.tag:
-        results = search_by_tag(conn, args.tag)
-        conn.close()
-        if not results:
-            print(f"*No sessions found with tag '{args.tag}'.*")
-            return
-        # Enrich with project context if search is via tag
-        print(f"*Found {len(results)} result(s) for tag '{args.tag}':*\n")
-        for r in results:
-            sid = r.get('session_id', '')
-            project = r.get('project_path', '')
-            started = format_short_date(r.get('session_started', ''))
-            exchange_idx = r.get('exchange_idx')
-            scope = f" (exchange #{exchange_idx})" if exchange_idx is not None else " (session)"
-            print(f"- **{Path(project).name if project else sid}** — Session {started}{scope}")
-        return
-
-    # ------------------------------------------------------------------
-    # Handle "search KEYWORD --global / --all / --project" modes
-    # ------------------------------------------------------------------
-    if command == 'search':
-        if not rest and not args.tag:
-            print("*Please specify a search term, e.g., 'search authentication'*")
-            conn.close()
-            return
-
-        keyword = ' '.join(rest)
-
-        # --global: search across all projects
-        if args.scope_global:
-            results = search_exchanges_global(conn, keyword, limit=20)
-            conn.close()
+        # ------------------------------------------------------------------
+        # Handle tag search — independent of session scope
+        # ------------------------------------------------------------------
+        if args.tag:
+            results = search_by_tag(conn, args.tag)
             if not results:
-                print(f"*No exchanges found matching '{keyword}' across all projects.*")
+                print(f"*No sessions found with tag '{args.tag}'.*")
                 return
-            print(f"*Global search for '{keyword}':*\n")
-            print(format_cross_project_results(results, keyword))
+            # Enrich with project context if search is via tag
+            print(f"*Found {len(results)} result(s) for tag '{args.tag}':*\n")
+            for r in results:
+                sid = r.get('session_id', '')
+                project = r.get('project_path', '')
+                started = format_short_date(r.get('session_started', ''))
+                exchange_idx = r.get('exchange_idx')
+                scope = f" (exchange #{exchange_idx})" if exchange_idx is not None else " (session)"
+                print(f"- **{Path(project).name if project else sid}** — Session {started}{scope}")
             return
 
-        # --project <name>: resolve sessions, then FTS within them
-        if args.project:
-            sessions = list_sessions(conn, project_path_contains=args.project)
-            if not sessions:
-                print(f"*No sessions found for project matching '{args.project}'.*")
-                conn.close()
+        # ------------------------------------------------------------------
+        # Handle "search KEYWORD --global / --all / --project" modes
+        # ------------------------------------------------------------------
+        if command == 'search':
+            if not rest and not args.tag:
+                print("*Please specify a search term, e.g., 'search authentication'*")
                 return
-            all_results = []
-            for s in sessions:
-                hits = search_exchanges_fts(conn, keyword, session_id=s['session_id'], limit=10)
-                for h in hits:
-                    h['project_path'] = s['project_path']
-                all_results.extend(hits)
-            conn.close()
-            if not all_results:
-                print(f"*No exchanges found matching '{keyword}' in project '{args.project}'.*")
-                return
-            print(f"*Search for '{keyword}' in project '{args.project}': {len(all_results)} match(es)*\n")
-            print(format_cross_project_results(all_results, keyword))
-            return
 
-        # --all: search all sessions in current project (needs --project-hash)
-        if args.scope_all:
-            project_hash = args.project_hash
-            if not project_hash and session_id:
-                sess = get_session(conn, session_id)
-                if sess:
-                    project_hash = sess.get('project_hash')
-            if not project_hash:
-                print("*--all requires a project hash (pass --project-hash or ensure --session is valid).*")
-                conn.close()
+            keyword = ' '.join(rest)
+
+            # --global: search across all projects
+            if args.scope_global:
+                results = search_exchanges_global(conn, keyword, limit=20)
+                if not results:
+                    print(f"*No exchanges found matching '{keyword}' across all projects.*")
+                    return
+                print(f"*Global search for '{keyword}':*\n")
+                print(format_cross_project_results(results, keyword))
                 return
-            results = search_exchanges_fts(conn, keyword, project_hash=project_hash, limit=20)
-            conn.close()
+
+            # --project <name>: resolve sessions, then FTS within them
+            if args.project:
+                sessions = list_sessions(conn, project_path_contains=args.project)
+                if not sessions:
+                    print(f"*No sessions found for project matching '{args.project}'.*")
+                    return
+                all_results = []
+                for s in sessions:
+                    hits = search_exchanges_fts(conn, keyword, session_id=s['session_id'], limit=10)
+                    for h in hits:
+                        h['project_path'] = s['project_path']
+                    all_results.extend(hits)
+                if not all_results:
+                    print(f"*No exchanges found matching '{keyword}' in project '{args.project}'.*")
+                    return
+                print(f"*Search for '{keyword}' in project '{args.project}': {len(all_results)} match(es)*\n")
+                print(format_cross_project_results(all_results, keyword))
+                return
+
+            # --all: search all sessions in current project (needs --project-hash)
+            if args.scope_all:
+                project_hash = args.project_hash
+                if not project_hash and session_id:
+                    sess = get_session(conn, session_id)
+                    if sess:
+                        project_hash = sess.get('project_hash')
+                if not project_hash:
+                    print("*--all requires a project hash (pass --project-hash or ensure --session is valid).*")
+                    return
+                results = search_exchanges_fts(conn, keyword, project_hash=project_hash, limit=20)
+                if not results:
+                    print(f"*No exchanges found matching '{keyword}' in this project.*")
+                    return
+                print(f"*Search for '{keyword}' across project ({len(results)} match(es)):*\n")
+                print(format_exchanges(results, f"search '{keyword}' --all"))
+                return
+
+            # Default: search current session
+            if not session_id:
+                print("*No session ID provided. Use --session <id> or set RECALL_SESSION_ID.*")
+                return
+
+            results = search_exchanges_fts(conn, keyword, session_id=session_id, limit=10)
             if not results:
-                print(f"*No exchanges found matching '{keyword}' in this project.*")
+                print(f"*No exchanges found matching '{keyword}'*")
+                print("*Search looks in both user prompts AND assistant responses.*")
                 return
-            print(f"*Search for '{keyword}' across project ({len(results)} match(es)):*\n")
-            print(format_exchanges(results, f"search '{keyword}' --all"))
+
+            if len(results) > 10:
+                print(f"*Found many matches for '{keyword}', showing 10 most recent:*\n")
+                results = results[:10]
+
+            print(f"*Fetched {len(results)} exchange(s) (search '{keyword}'):*\n")
+            print(format_exchanges(results, f"search '{keyword}'"))
             return
 
-        # Default: search current session
+        # ------------------------------------------------------------------
+        # Session-scoped commands: lastN, around
+        # ------------------------------------------------------------------
         if not session_id:
             print("*No session ID provided. Use --session <id> or set RECALL_SESSION_ID.*")
-            conn.close()
             return
 
-        results = search_exchanges_fts(conn, keyword, session_id=session_id, limit=10)
+        # Verify session exists
+        session = get_session(conn, session_id)
+        if session is None:
+            print(f"*Session '{session_id}' not found in database.*")
+            return
+
+        # Handle "lastN"
+        if command.startswith('last'):
+            all_exchanges = get_exchanges(conn, session_id)
+            total = len(all_exchanges)
+            if total == 0:
+                print("*No exchanges found in the current session.*")
+                return
+
+            target_indices = parse_last_n(command, total)
+            if not target_indices:
+                print(f"*Invalid format: {command}. Try 'last5' or 'last10'.*")
+                return
+
+            selected = [ex for ex in all_exchanges if ex['idx'] in target_indices]
+            selected.sort(key=lambda x: x['idx'])
+            print(f"*Fetched {len(selected)} exchange(s) ({command}):*\n")
+            print(format_exchanges(selected, command))
+            return
+
+        # Handle "around TIME"
+        if command == 'around':
+            if not rest:
+                print("*Please specify a time, e.g., 'around 2pm' or 'around \"jan 5 2pm\"'*")
+                return
+
+            time_str = ' '.join(rest)
+            all_exchanges = get_exchanges(conn, session_id)
+
+            if not all_exchanges:
+                print("*No exchanges found in the current session.*")
+                return
+
+            result = parse_date_time_query(time_str, get_session_dates(all_exchanges))
+            if not result:
+                print(f"*Could not parse time: '{time_str}'. Try formats like '2pm', '2:30pm', 'jan 5 2pm'*")
+                return
+
+            target_time, target_date = result
+
+            # Warn about multi-day sessions when no date specified
+            session_dates = get_session_dates(all_exchanges)
+            if len(session_dates) > 1 and not target_date:
+                formatted = ', '.join(format_short_date(d + 'T00:00:00Z') for d in session_dates)
+                print(f"*Note: Session spans {len(session_dates)} days: {formatted}*")
+                print(f"*Showing closest match to {time_str}. Specify date for precision (e.g., 'jan 5 2pm')*\n")
+
+            target_idx_list = find_exchanges_by_time(all_exchanges, target_time, target_date)
+            if not target_idx_list:
+                print(f"*No exchanges found around {time_str}*")
+                return
+
+            target_indices = set(target_idx_list)
+            selected = [ex for ex in all_exchanges if ex['idx'] in target_indices]
+            selected.sort(key=lambda x: x['idx'])
+            print(f"*Fetched {len(selected)} exchange(s) (around {time_str}):*\n")
+            print(format_exchanges(selected, f"around {time_str}"))
+            return
+
+        # Unknown command
+        print(f"*Unknown command: '{command}'*\n")
+        print_usage()
+    finally:
         conn.close()
-        if not results:
-            print(f"*No exchanges found matching '{keyword}'*")
-            print("*Search looks in both user prompts AND assistant responses.*")
-            return
-
-        if len(results) > 10:
-            print(f"*Found many matches for '{keyword}', showing 10 most recent:*\n")
-            results = results[:10]
-
-        print(f"*Fetched {len(results)} exchange(s) (search '{keyword}'):*\n")
-        print(format_exchanges(results, f"search '{keyword}'"))
-        return
-
-    # ------------------------------------------------------------------
-    # Session-scoped commands: lastN, around
-    # ------------------------------------------------------------------
-    if not session_id:
-        print("*No session ID provided. Use --session <id> or set RECALL_SESSION_ID.*")
-        conn.close()
-        return
-
-    # Verify session exists
-    session = get_session(conn, session_id)
-    if session is None:
-        print(f"*Session '{session_id}' not found in database.*")
-        conn.close()
-        return
-
-    # Handle "lastN"
-    if command.startswith('last'):
-        all_exchanges = get_exchanges(conn, session_id)
-        conn.close()
-        total = len(all_exchanges)
-        if total == 0:
-            print("*No exchanges found in the current session.*")
-            return
-
-        target_indices = parse_last_n(command, total)
-        if not target_indices:
-            print(f"*Invalid format: {command}. Try 'last5' or 'last10'.*")
-            return
-
-        selected = [ex for ex in all_exchanges if ex['idx'] in target_indices]
-        selected.sort(key=lambda x: x['idx'])
-        print(f"*Fetched {len(selected)} exchange(s) ({command}):*\n")
-        print(format_exchanges(selected, command))
-        return
-
-    # Handle "around TIME"
-    if command == 'around':
-        if not rest:
-            print("*Please specify a time, e.g., 'around 2pm' or 'around \"jan 5 2pm\"'*")
-            conn.close()
-            return
-
-        time_str = ' '.join(rest)
-        all_exchanges = get_exchanges(conn, session_id)
-        conn.close()
-
-        if not all_exchanges:
-            print("*No exchanges found in the current session.*")
-            return
-
-        result = parse_date_time_query(time_str, get_session_dates(all_exchanges))
-        if not result:
-            print(f"*Could not parse time: '{time_str}'. Try formats like '2pm', '2:30pm', 'jan 5 2pm'*")
-            return
-
-        target_time, target_date = result
-
-        # Warn about multi-day sessions when no date specified
-        session_dates = get_session_dates(all_exchanges)
-        if len(session_dates) > 1 and not target_date:
-            formatted = ', '.join(format_short_date(d + 'T00:00:00Z') for d in session_dates)
-            print(f"*Note: Session spans {len(session_dates)} days: {formatted}*")
-            print(f"*Showing closest match to {time_str}. Specify date for precision (e.g., 'jan 5 2pm')*\n")
-
-        target_idx_list = find_exchanges_by_time(all_exchanges, target_time, target_date)
-        if not target_idx_list:
-            print(f"*No exchanges found around {time_str}*")
-            return
-
-        target_indices = set(target_idx_list)
-        selected = [ex for ex in all_exchanges if ex['idx'] in target_indices]
-        selected.sort(key=lambda x: x['idx'])
-        print(f"*Fetched {len(selected)} exchange(s) (around {time_str}):*\n")
-        print(format_exchanges(selected, f"around {time_str}"))
-        return
-
-    # Unknown command
-    print(f"*Unknown command: '{command}'*\n")
-    print_usage()
-    conn.close()
 
 
 if __name__ == '__main__':

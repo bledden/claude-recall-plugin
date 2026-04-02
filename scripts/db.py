@@ -195,15 +195,19 @@ def insert_exchanges(conn: sqlite3.Connection, session_id: str,
         )
         if cur.rowcount > 0:
             new_rowids.append(cur.lastrowid)
-    conn.commit()
 
-    # Add newly inserted rows to the FTS5 index
+    # Add newly inserted rows to the FTS5 index within the same transaction
     if new_rowids:
         _insert_fts_rows(conn, new_rowids)
 
+    conn.commit()
+
 
 def _insert_fts_rows(conn, rowids):
-    """Insert specific exchange rows into the FTS5 index by rowid."""
+    """Insert specific exchange rows into the FTS5 index by rowid.
+
+    Does NOT commit — the caller is responsible for committing the transaction.
+    """
     placeholders = ','.join('?' for _ in rowids)
     rows = conn.execute(
         "SELECT id, user_text, assistant_text, preview FROM exchanges "
@@ -216,7 +220,6 @@ def _insert_fts_rows(conn, rowids):
             "VALUES(?, ?, ?, ?)",
             (row['id'], row['user_text'], row['assistant_text'], row['preview']),
         )
-    conn.commit()
 
 
 def _delete_fts_rows(conn, session_id):
