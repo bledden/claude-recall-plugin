@@ -141,13 +141,17 @@ def auto_detect_highlights(conn, session_id: str,
             continue
 
         # Build summary: collapse whitespace, then truncate
+        # Include exchange idx in summary to avoid collisions when multiple
+        # exchanges produce similar assistant text
         cleaned = re.sub(r'\s+', ' ', assistant_text).strip()
-        if len(cleaned) > HIGHLIGHT_SUMMARY_MAX_CHARS:
-            summary = cleaned[:HIGHLIGHT_SUMMARY_MAX_CHARS] + '...'
-        else:
-            summary = cleaned
-
         exchange_idx = exchange.get('idx')
+        prefix = f"[#{exchange_idx}] " if exchange_idx is not None else ""
+        max_text = HIGHLIGHT_SUMMARY_MAX_CHARS - len(prefix)
+        if len(cleaned) > max_text:
+            summary = prefix + cleaned[:max_text] + '...'
+        else:
+            summary = prefix + cleaned
+
         insert_highlight(conn, session_id, summary, tags,
                          source='auto', exchange_idx=exchange_idx)
         created_summaries.append(summary)

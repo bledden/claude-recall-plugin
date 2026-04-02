@@ -29,6 +29,15 @@ from db import (
     export_session_json,
     insert_tag,
     get_tags,
+    insert_highlight,
+    get_highlights,
+    get_highlights_for_connections,
+    insert_connection,
+    get_connections,
+    update_connection_check,
+    delete_connection,
+    get_session_config,
+    set_session_config,
     DB_DIR,
     DB_PATH,
     DB_BUSY_TIMEOUT_MS,
@@ -381,6 +390,210 @@ class TestMaintenance(unittest.TestCase):
         self.assertEqual(len(data['exchanges']), 1)
         self.assertEqual(len(data['tags']), 1)
         self.assertEqual(data['tags'][0]['tag'], 'rust')
+
+
+class TestHighlightCRUD(unittest.TestCase):
+    """Tests for highlight insert, get, and dedup."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test.db')
+        self.conn = get_connection(self.db_path)
+        insert_session(self.conn, 'sess-h', '/p', 'h', '2025-01-01T00:00:00Z')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_insert_and_get_highlight(self):
+        """Insert a highlight and retrieve it for the session."""
+        insert_highlight(self.conn, 'sess-h', 'Fixed the memory leak', 'bug,memory', 'manual', exchange_idx=3)
+        rows = get_highlights(self.conn, 'sess-h')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['summary'], 'Fixed the memory leak')
+        self.assertEqual(rows[0]['tags'], 'bug,memory')
+        self.assertEqual(rows[0]['source'], 'manual')
+        self.assertEqual(rows[0]['exchange_idx'], 3)
+
+    def test_get_highlights_since_timestamp(self):
+        """get_highlights with since= returns only newer highlights."""
+        # Manually insert two highlights with known timestamps
+        self.conn.execute(
+            "INSERT INTO highlights (session_id, summary, tags, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ('sess-h', 'Old highlight', '', 'auto', '2025-01-01T00:00:00Z'),
+        )
+        self.conn.execute(
+            "INSERT INTO highlights (session_id, summary, tags, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ('sess-h', 'New highlight', '', 'auto', '2025-06-01T00:00:00Z'),
+        )
+        self.conn.commit()
+        rows = get_highlights(self.conn, 'sess-h', since='2025-03-01T00:00:00Z')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['summary'], 'New highlight')
+
+    def test_duplicate_summary_ignored(self):
+        """Inserting a duplicate (session_id, summary) pair is silently ignored."""
+        insert_highlight(self.conn, 'sess-h', 'Same summary', 'tag', 'manual')
+        insert_highlight(self.conn, 'sess-h', 'Same summary', 'other', 'auto')
+        rows = get_highlights(self.conn, 'sess-h')
+        self.assertEqual(len(rows), 1)
+
+    def test_get_highlights_for_connections_enriched(self):
+        """get_highlights_for_connections returns unchecked highlights across connections."""
+        insert_session(self.conn, 'sess-w', '/w', 'hw', '2025-01-01T00:00:00Z')
+        insert_session(self.conn, 'sess-t', '/t', 'ht', '2025-01-01T00:00:00Z')
+        insert_connection(self.conn, 'sess-w', 'sess-t', 'performance work')
+        insert_highlight(self.conn, 'sess-t', 'Optimised hot path', 'perf', 'manual')
+        results = get_highlights_for_connections(self.conn, 'sess-w')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['summary'], 'Optimised hot path')
+        self.assertEqual(results[0]['connection_topic'], 'performance work')
+
+
+class TestConnectionCRUD(unittest.TestCase):
+    """Tests for connection insert, get, update, and delete."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test.db')
+        self.conn = get_connection(self.db_path)
+        insert_session(self.conn, 'sess-w', '/w', 'hw', '2025-01-01T00:00:00Z')
+        insert_session(self.conn, 'sess-t1', '/t1', 'ht1', '2025-01-01T00:00:00Z')
+        insert_session(self.conn, 'sess-t2', '/t2', 'ht2', '2025-01-01T00:00:00Z')
+        insert_session(self.conn, 'sess-other', '/o', 'ho', '2025-01-01T00:00:00Z')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_insert_and_get_connection(self):
+        """Insert a connection and retrieve it."""
+        insert_connection(self.conn, 'sess-w', 'sess-t1', 'ML experiments',
+                          check_mode='explicit', delivery_mode='silent')
+        conns = get_connections(self.conn, 'sess-w')
+        self.assertEqual(len(conns), 1)
+        c = conns[0]
+        self.assertEqual(c['watcher_session'], 'sess-w')
+        self.assertEqual(c['target_session'], 'sess-t1')
+        self.assertEqual(c['topic'], 'ML experiments')
+        self.assertEqual(c['check_mode'], 'explicit')
+        self.assertEqual(c['delivery_mode'], 'silent')
+        self.assertIsNone(c['last_checked_at'])
+
+    def test_get_connections_returns_only_for_watcher(self):
+        """get_connections does not return connections belonging to other watchers."""
+        insert_connection(self.conn, 'sess-w', 'sess-t1', 'topic A')
+        insert_connection(self.conn, 'sess-other', 'sess-t2', 'topic B')
+        conns = get_connections(self.conn, 'sess-w')
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(conns[0]['target_session'], 'sess-t1')
+
+    def test_update_connection_check_state(self):
+        """update_connection_check persists counter, interval, and last_checked_at."""
+        insert_connection(self.conn, 'sess-w', 'sess-t1', 'topic')
+        conn_id = get_connections(self.conn, 'sess-w')[0]['id']
+        update_connection_check(self.conn, conn_id,
+                                check_counter=3, check_interval=14,
+                                last_checked_at='2025-06-01T12:00:00Z')
+        c = get_connections(self.conn, 'sess-w')[0]
+        self.assertEqual(c['check_counter'], 3)
+        self.assertEqual(c['check_interval'], 14)
+        self.assertEqual(c['last_checked_at'], '2025-06-01T12:00:00Z')
+
+    def test_delete_connection(self):
+        """delete_connection removes the row."""
+        insert_connection(self.conn, 'sess-w', 'sess-t1', 'topic')
+        self.assertEqual(len(get_connections(self.conn, 'sess-w')), 1)
+        delete_connection(self.conn, 'sess-w', 'sess-t1')
+        self.assertEqual(len(get_connections(self.conn, 'sess-w')), 0)
+
+    def test_duplicate_connection_ignored(self):
+        """Inserting a duplicate (watcher, target) pair is silently ignored."""
+        insert_connection(self.conn, 'sess-w', 'sess-t1', 'topic A')
+        insert_connection(self.conn, 'sess-w', 'sess-t1', 'topic B')
+        conns = get_connections(self.conn, 'sess-w')
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(conns[0]['topic'], 'topic A')
+
+
+class TestSessionConfig(unittest.TestCase):
+    """Tests for get_session_config / set_session_config."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test.db')
+        self.conn = get_connection(self.db_path)
+        insert_session(self.conn, 'sess-cfg', '/p', 'h', '2025-01-01T00:00:00Z')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_set_and_get_config_value(self):
+        """set_session_config writes a value; get_session_config reads it back."""
+        set_session_config(self.conn, 'sess-cfg', 'auto_highlight', True)
+        val = get_session_config(self.conn, 'sess-cfg', 'auto_highlight')
+        self.assertIs(val, True)
+
+    def test_get_nonexistent_key_returns_none(self):
+        """get_session_config returns None for a key that was never set."""
+        val = get_session_config(self.conn, 'sess-cfg', 'missing_key')
+        self.assertIsNone(val)
+
+    def test_set_overwrites_existing_value(self):
+        """set_session_config merges into existing JSON, overwriting the same key."""
+        set_session_config(self.conn, 'sess-cfg', 'threshold', 5)
+        set_session_config(self.conn, 'sess-cfg', 'mode', 'auto')
+        set_session_config(self.conn, 'sess-cfg', 'threshold', 10)
+        self.assertEqual(get_session_config(self.conn, 'sess-cfg', 'threshold'), 10)
+        # Other keys must survive the overwrite
+        self.assertEqual(get_session_config(self.conn, 'sess-cfg', 'mode'), 'auto')
+
+
+class TestHighlightsForConnections(unittest.TestCase):
+    """Tests for get_highlights_for_connections filtering logic."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test.db')
+        self.conn = get_connection(self.db_path)
+        insert_session(self.conn, 'watcher', '/w', 'hw', '2025-01-01T00:00:00Z')
+        insert_session(self.conn, 'target', '/t', 'ht', '2025-01-01T00:00:00Z')
+        # Pre-insert highlights with fixed timestamps
+        self.conn.execute(
+            "INSERT INTO highlights (session_id, summary, tags, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ('target', 'Early highlight', '', 'auto', '2025-01-15T00:00:00Z'),
+        )
+        self.conn.execute(
+            "INSERT INTO highlights (session_id, summary, tags, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ('target', 'Late highlight', '', 'auto', '2025-06-15T00:00:00Z'),
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_returns_highlights_after_last_checked_at(self):
+        """Only highlights created after last_checked_at are returned."""
+        insert_connection(self.conn, 'watcher', 'target', 'topic')
+        conn_id = get_connections(self.conn, 'watcher')[0]['id']
+        update_connection_check(self.conn, conn_id,
+                                check_counter=1, check_interval=7,
+                                last_checked_at='2025-03-01T00:00:00Z')
+        results = get_highlights_for_connections(self.conn, 'watcher')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['summary'], 'Late highlight')
+
+    def test_returns_all_highlights_when_never_checked(self):
+        """When last_checked_at is NULL (first check), all highlights are returned."""
+        insert_connection(self.conn, 'watcher', 'target', 'topic')
+        results = get_highlights_for_connections(self.conn, 'watcher')
+        self.assertEqual(len(results), 2)
 
 
 if __name__ == '__main__':

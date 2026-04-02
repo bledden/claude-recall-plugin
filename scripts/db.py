@@ -8,6 +8,7 @@ All functions accept a sqlite3.Connection and are safe for concurrent
 reads via WAL mode with a 5-second busy timeout.
 """
 
+import json
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -69,6 +70,36 @@ CREATE INDEX IF NOT EXISTS idx_exchanges_session ON exchanges(session_id);
 CREATE INDEX IF NOT EXISTS idx_tags_session ON tags(session_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_hash);
+
+CREATE TABLE IF NOT EXISTS highlights (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+    summary         TEXT NOT NULL,
+    exchange_idx    INTEGER,
+    tags            TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    UNIQUE(session_id, summary)
+);
+
+CREATE TABLE IF NOT EXISTS connections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    watcher_session TEXT NOT NULL REFERENCES sessions(session_id),
+    target_session  TEXT NOT NULL REFERENCES sessions(session_id),
+    topic           TEXT NOT NULL,
+    check_mode      TEXT NOT NULL DEFAULT 'explicit',
+    check_counter   INTEGER DEFAULT 0,
+    check_interval  INTEGER DEFAULT 7,
+    last_checked_at TEXT,
+    delivery_mode   TEXT NOT NULL DEFAULT 'silent',
+    created_at      TEXT NOT NULL,
+    UNIQUE(watcher_session, target_session)
+);
+
+CREATE INDEX IF NOT EXISTS idx_highlights_session ON highlights(session_id);
+CREATE INDEX IF NOT EXISTS idx_highlights_created ON highlights(created_at);
+CREATE INDEX IF NOT EXISTS idx_connections_watcher ON connections(watcher_session);
+CREATE INDEX IF NOT EXISTS idx_connections_target ON connections(target_session);
 """
 
 # ---------------------------------------------------------------------------
@@ -342,11 +373,16 @@ def search_exchanges_global(conn: sqlite3.Connection, query: str,
 # ---------------------------------------------------------------------------
 
 def prune_session(conn: sqlite3.Connection, session_id: str) -> None:
-    """Delete a session, its exchanges (including FTS entries), and tags."""
+    """Delete a session, its exchanges (including FTS entries), tags, highlights, and connections."""
     # Remove FTS entries BEFORE deleting exchanges (needs column values)
     _delete_fts_rows(conn, session_id)
 
     conn.execute("DELETE FROM tags WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM highlights WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "DELETE FROM connections WHERE watcher_session = ? OR target_session = ?",
+        (session_id, session_id)
+    )
     conn.execute("DELETE FROM exchanges WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
     conn.commit()
@@ -468,3 +504,149 @@ def get_tags(conn: sqlite3.Connection, session_id: Optional[str] = None,
     else:
         rows = conn.execute("SELECT * FROM tags ORDER BY tag").fetchall()
     return [dict(r) for r in rows]
+
+# ---------------------------------------------------------------------------
+# Highlight CRUD
+# ---------------------------------------------------------------------------
+
+def insert_highlight(conn: sqlite3.Connection, session_id: str, summary: str,
+                     tags: str, source: str,
+                     exchange_idx: Optional[int] = None) -> None:
+    """Insert a highlight. INSERT OR IGNORE for dedup."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO highlights "
+        "(session_id, summary, exchange_idx, tags, source, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, summary, exchange_idx, tags, source, now),
+    )
+    conn.commit()
+
+
+def get_highlights(conn: sqlite3.Connection, session_id: str,
+                   since: Optional[str] = None,
+                   limit: int = 20) -> List[Dict]:
+    """Get highlights for a session, optionally filtered by created_at > since."""
+    sql = "SELECT * FROM highlights WHERE session_id = ?"
+    params: List[Any] = [session_id]
+    if since is not None:
+        sql += " AND created_at > ?"
+        params.append(since)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    cur = conn.execute(sql, params)
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_highlights_for_connections(conn: sqlite3.Connection,
+                                   watcher_session: str) -> List[Dict]:
+    """Get unchecked highlights across all connections for a watcher.
+
+    For each connection, fetches highlights from the target session where
+    created_at > connection.last_checked_at (or all if never checked).
+    Returns highlights enriched with the connection's topic.
+    """
+    connections = get_connections(conn, watcher_session)
+    results: List[Dict] = []
+    for c in connections:
+        sql = "SELECT * FROM highlights WHERE session_id = ?"
+        params: List[Any] = [c['target_session']]
+        if c['last_checked_at'] is not None:
+            sql += " AND created_at > ?"
+            params.append(c['last_checked_at'])
+        sql += " ORDER BY created_at ASC"
+        rows = conn.execute(sql, params).fetchall()
+        for row in rows:
+            enriched = dict(row)
+            enriched['connection_topic'] = c['topic']
+            results.append(enriched)
+    return results
+
+# ---------------------------------------------------------------------------
+# Connection CRUD
+# ---------------------------------------------------------------------------
+
+def insert_connection(conn: sqlite3.Connection, watcher_session: str,
+                      target_session: str, topic: str,
+                      check_mode: str = 'explicit',
+                      delivery_mode: str = 'silent') -> None:
+    """Create a connection. INSERT OR IGNORE."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO connections "
+        "(watcher_session, target_session, topic, check_mode, delivery_mode, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (watcher_session, target_session, topic, check_mode, delivery_mode, now),
+    )
+    conn.commit()
+
+
+def get_connections(conn: sqlite3.Connection,
+                    watcher_session: str) -> List[Dict]:
+    """Get all connections for a watcher session."""
+    cur = conn.execute(
+        "SELECT * FROM connections WHERE watcher_session = ? ORDER BY created_at",
+        (watcher_session,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def update_connection_check(conn: sqlite3.Connection, connection_id: int,
+                            check_counter: int, check_interval: int,
+                            last_checked_at: str) -> None:
+    """Update a connection's check state (counter, interval, last_checked)."""
+    conn.execute(
+        "UPDATE connections "
+        "SET check_counter = ?, check_interval = ?, last_checked_at = ? "
+        "WHERE id = ?",
+        (check_counter, check_interval, last_checked_at, connection_id),
+    )
+    conn.commit()
+
+
+def delete_connection(conn: sqlite3.Connection, watcher_session: str,
+                      target_session: str) -> None:
+    """Delete a connection."""
+    conn.execute(
+        "DELETE FROM connections WHERE watcher_session = ? AND target_session = ?",
+        (watcher_session, target_session),
+    )
+    conn.commit()
+
+# ---------------------------------------------------------------------------
+# Session config (stored in sessions.metadata JSON blob)
+# ---------------------------------------------------------------------------
+
+def get_session_config(conn: sqlite3.Connection, session_id: str,
+                       key: str) -> Any:
+    """Read a config value from sessions.metadata JSON. Returns None if not set."""
+    row = conn.execute(
+        "SELECT metadata FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None or row['metadata'] is None:
+        return None
+    try:
+        data = json.loads(row['metadata'])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return data.get(key)
+
+
+def set_session_config(conn: sqlite3.Connection, session_id: str,
+                       key: str, value: Any) -> None:
+    """Write a config value to sessions.metadata JSON. Merges with existing."""
+    row = conn.execute(
+        "SELECT metadata FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return
+    try:
+        data = json.loads(row['metadata']) if row['metadata'] else {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    data[key] = value
+    conn.execute(
+        "UPDATE sessions SET metadata = ? WHERE session_id = ?",
+        (json.dumps(data), session_id),
+    )
+    conn.commit()
