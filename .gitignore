@@ -19,6 +19,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Worktrees
+.worktrees/
+
 # Test artifacts
 .coverage
 htmlcov/
