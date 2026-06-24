@@ -8,6 +8,7 @@ Two paths:
 Pure stdlib — no external dependencies.
 """
 
+import argparse
 import re
 import sqlite3
 import sys
@@ -167,20 +168,70 @@ def auto_detect_highlights(conn: sqlite3.Connection, session_id: str,
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    """CLI: highlight.py <session_id> "summary" [exchange_idx]"""
-    if len(sys.argv) < 3:
-        print("Usage: highlight.py <session_id> \"summary\" [exchange_idx]",
-              file=sys.stderr)
-        sys.exit(1)
+def _non_negative_int(raw: str) -> int:
+    """argparse type for --exchange: a non-negative integer.
 
-    session_id = sys.argv[1]
-    summary = sys.argv[2]
-    exchange_idx = int(sys.argv[3]) if len(sys.argv) >= 4 else None
+    Raises argparse.ArgumentTypeError for non-int or negative values so the
+    parser emits a clean error (exit code 2) instead of an uncaught ValueError.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"invalid int value: {raw!r}")
+    if value < 0:
+        raise argparse.ArgumentTypeError(
+            f"exchange index must be >= 0, got {value}")
+    return value
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the highlight CLI.
+
+    Positional: session_id, summary.
+    Optional:   --exchange (non-negative int).
+
+    Using argparse makes -h/--help safe (it exits before any DB access) and
+    turns a bad --exchange value into a clean error instead of a crash.
+    """
+    parser = argparse.ArgumentParser(
+        prog="highlight.py",
+        description="Create an explicit highlight for a Claude Context Recall session.",
+    )
+    parser.add_argument("session_id", help="The active session ID.")
+    parser.add_argument("summary", help="Human-readable summary of the insight.")
+    parser.add_argument(
+        "--exchange",
+        type=_non_negative_int,
+        default=None,
+        metavar="IDX",
+        help="Exchange index to anchor the highlight (must be >= 0).",
+    )
+    return parser
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments without touching the database.
+
+    Args:
+        argv: Argument list (excluding the program name). Defaults to sys.argv[1:].
+
+    Returns:
+        Parsed namespace with session_id, summary, and exchange attributes.
+
+    Raises:
+        SystemExit: on -h/--help (code 0) or invalid arguments (code 2).
+    """
+    return build_arg_parser().parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """CLI: highlight.py <session_id> <summary> [--exchange IDX]"""
+    args = parse_args(argv)
 
     conn = get_connection()
     try:
-        result = create_highlight(conn, session_id, summary, exchange_idx)
+        result = create_highlight(conn, args.session_id, args.summary,
+                                  args.exchange)
         print(result)
     finally:
         conn.close()

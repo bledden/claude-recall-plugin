@@ -144,24 +144,30 @@ When suggesting recall commands, use these:
 
 ### Core Recall
 - `/recall` — interactive menu
-- `/recall last5` / `/recall last10` — recent exchanges
+- `/recall last5` / `/recall last10` (`lastN` — any positive N) — recent exchanges
 - `/recall search <keyword>` — search current session
 - `/recall search <keyword> --all` — search all sessions in project
 - `/recall search <keyword> --global` — search across all projects
-- `/recall search <keyword> --project <name>` — search specific project
+- `/recall search <keyword> --project <name>` — search specific project (unanchored substring path match)
 - `/recall around <time>` — exchanges around a time
 
 ### Session Management
 - `/recall sessions` — list all sessions
 - `/recall sessions --all` — list sessions across all projects
-- `/recall sessions --project <name>` — list sessions in specific project
+- `/recall sessions --project <name>` — list sessions in specific project (unanchored substring path match)
 - `/recall session <id> last10` — browse a past session
 - `/recall stats` — storage statistics
 
 ### Tagging
 - `/recall tag <name>` — tag current session
 - `/recall tags` — list all tags
+- `/recall tags --project <hash>` — list tags for a project HASH (exact match; distinct from `sessions --project <name>`, which takes a name/path)
 - `/recall search --tag <name>` — find by tag
+
+### Maintenance
+- `/recall prune --session <id>` — delete a specific session
+- `/recall prune --before <date>` — delete sessions before a date
+- `/recall export --session <id>` — export a session (always emits JSON)
 
 ### Cross-Session Sharing
 - `/recall highlight "summary"` — flag a finding

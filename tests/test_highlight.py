@@ -29,6 +29,8 @@ from highlight import (
     create_highlight,
     detect_solution_signals,
     auto_detect_highlights,
+    build_arg_parser,
+    parse_args,
     SOLUTION_SIGNALS,
     SOLUTION_SIGNAL_THRESHOLD,
     HIGHLIGHT_SUMMARY_MAX_CHARS,
@@ -305,6 +307,73 @@ class TestAutoDetectConservative(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Constant sanity checks
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# TestArgParsing (WI-16): argparse migration
+# ---------------------------------------------------------------------------
+
+class TestArgParsing(unittest.TestCase):
+    """Tests for the argparse-based CLI argument handling (WI-16).
+
+    These tests exercise ONLY argument parsing — they never open the real
+    database. A footgun in the old positional-only sys.argv parser was that
+    `highlight.py --help "x"` performed a REAL insert with session_id='--help',
+    and a non-int exchange_idx raised an uncaught ValueError.
+    """
+
+    def test_parses_positional_session_id_and_summary(self):
+        """session_id and summary are parsed as positionals; exchange defaults to None."""
+        args = parse_args(['sess-123', 'My summary'])
+        self.assertEqual(args.session_id, 'sess-123')
+        self.assertEqual(args.summary, 'My summary')
+        self.assertIsNone(args.exchange)
+
+    def test_parses_optional_exchange_as_int(self):
+        """--exchange is parsed as an int."""
+        args = parse_args(['sess-123', 'My summary', '--exchange', '4'])
+        self.assertEqual(args.exchange, 4)
+        self.assertIsInstance(args.exchange, int)
+
+    def test_help_flag_exits_without_insert(self):
+        """-h/--help must exit cleanly (SystemExit code 0), never treated as a session_id.
+
+        The old parser would call create_highlight with session_id='--help'
+        and perform a real insert. argparse must intercept the flag and exit
+        with code 0 before any DB work.
+        """
+        for flag in ('-h', '--help'):
+            with self.assertRaises(SystemExit) as ctx:
+                parse_args([flag, 'x'])
+            self.assertEqual(ctx.exception.code, 0)
+
+    def test_non_int_exchange_gives_clean_argparse_error(self):
+        """A non-int --exchange triggers an argparse error (SystemExit code 2), not ValueError."""
+        with self.assertRaises(SystemExit) as ctx:
+            parse_args(['sess-123', 'summary', '--exchange', 'notanint'])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_negative_exchange_is_rejected(self):
+        """--exchange must be >= 0; a negative value is an argparse error (code 2)."""
+        with self.assertRaises(SystemExit) as ctx:
+            parse_args(['sess-123', 'summary', '--exchange', '-1'])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_zero_exchange_is_accepted(self):
+        """--exchange of 0 is valid (>= 0 boundary)."""
+        args = parse_args(['sess-123', 'summary', '--exchange', '0'])
+        self.assertEqual(args.exchange, 0)
+
+    def test_missing_required_args_errors(self):
+        """Missing required positionals is an argparse error (code 2), not a real insert."""
+        with self.assertRaises(SystemExit) as ctx:
+            parse_args(['only-session-id'])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_build_arg_parser_returns_argument_parser(self):
+        """build_arg_parser returns an argparse.ArgumentParser instance."""
+        import argparse
+        self.assertIsInstance(build_arg_parser(), argparse.ArgumentParser)
+
 
 class TestConstants(unittest.TestCase):
     """Verify the module constants have the expected values from the spec."""

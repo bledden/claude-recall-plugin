@@ -17,6 +17,7 @@ from manage_tags import (
     search_by_tag,
     get_tags_by_session,
     format_tag_list,
+    resolve_project_filter,
 )
 
 
@@ -66,6 +67,60 @@ class TestAddTag(unittest.TestCase):
         add_tag(self.conn, 'python', 'sess-001')
         tags = get_tags(self.conn, session_id='sess-001')
         self.assertEqual(len(tags), 1)
+
+    # WI-12: add_tag must report whether the tag was newly inserted.
+    def test_add_session_tag_returns_true_when_inserted(self):
+        """A first-time session-level add reports it was inserted."""
+        inserted = add_tag(self.conn, 'rust', 'sess-001')
+        self.assertTrue(inserted)
+
+    def test_add_session_tag_returns_false_when_already_present(self):
+        """A repeated session-level add reports the tag already existed."""
+        add_tag(self.conn, 'rust', 'sess-001')
+        inserted = add_tag(self.conn, 'rust', 'sess-001')
+        self.assertFalse(inserted)
+
+    def test_add_exchange_tag_returns_true_when_inserted(self):
+        """A first-time exchange-level add reports it was inserted."""
+        inserted = add_tag(self.conn, 'cuda', 'sess-001', exchange_idx=0)
+        self.assertTrue(inserted)
+
+    def test_add_exchange_tag_returns_false_when_already_present(self):
+        """A repeated exchange-level add reports the tag already existed."""
+        add_tag(self.conn, 'cuda', 'sess-001', exchange_idx=0)
+        inserted = add_tag(self.conn, 'cuda', 'sess-001', exchange_idx=0)
+        self.assertFalse(inserted)
+
+
+class TestResolveProjectFilter(unittest.TestCase):
+    """Tests for resolve_project_filter() — WI-13."""
+
+    def test_none_passes_through(self):
+        """A None filter resolves to None (no filtering)."""
+        self.assertIsNone(resolve_project_filter(None))
+
+    def test_hash_passed_through_unchanged(self):
+        """A 16-char hex hash is treated as a hash and returned unchanged."""
+        h = 'a1b2c3d4e5f60718'
+        self.assertEqual(resolve_project_filter(h), h)
+
+    def test_path_resolved_to_hash(self):
+        """A filesystem path is resolved to its project hash."""
+        from utils import compute_project_hash
+        path = '/proj/alpha'
+        self.assertEqual(
+            resolve_project_filter(path),
+            compute_project_hash(path),
+        )
+
+    def test_home_relative_path_resolved_to_hash(self):
+        """A ~-prefixed path is recognized as a path and resolved."""
+        from utils import compute_project_hash
+        path = '~/code/myproj'
+        self.assertEqual(
+            resolve_project_filter(path),
+            compute_project_hash(path),
+        )
 
 
 class TestSearchByTag(unittest.TestCase):

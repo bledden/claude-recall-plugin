@@ -6,7 +6,7 @@ import sys
 import tempfile
 import shutil
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add scripts directory to path
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 from db import get_connection, insert_session, insert_exchanges
 from show_index import (
     find_page_for_time,
-    search_exchanges,
+    search_session,
     format_page,
     format_search_results,
     get_session_date_range,
@@ -128,6 +128,21 @@ class TestFormatPageEmpty(unittest.TestCase):
         result = format_page(SAMPLE_EXCHANGES_5, 99, 5, '2025-01-15T09:00:00Z')
         self.assertIn('empty', result.lower())
 
+    # --- WI-8(c): page < 1 must be guarded ---
+
+    def test_page_negative_one_does_not_render_garbage_slice(self):
+        """--page -1 must NOT render a negative-index slice labeled 'page -1'."""
+        result = format_page(SAMPLE_EXCHANGES_5, -1, 5, '2025-01-15T09:00:00Z')
+        # It must not advertise a 'page -1' nor leak exchange previews.
+        self.assertNotIn('page -1', result.lower())
+        self.assertNotIn('Exchange 1 preview', result)
+        self.assertNotIn('Exchange 5 preview', result)
+
+    def test_page_zero_does_not_render_garbage_slice(self):
+        """--page 0 must be guarded the same way as a too-large page."""
+        result = format_page(SAMPLE_EXCHANGES_5, 0, 5, '2025-01-15T09:00:00Z')
+        self.assertNotIn('Exchange 5 preview', result)
+
 
 # ---------------------------------------------------------------------------
 # test_pagination_multiple_pages
@@ -172,51 +187,54 @@ class TestPaginationMultiplePages(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# test_search_exchanges_finds_matches
+# WI-8(a): search routed through FTS via search_session()
 # ---------------------------------------------------------------------------
 
-class TestSearchExchangesFindsMatches(unittest.TestCase):
+class TestSearchSessionFTS(unittest.TestCase):
+    """search_session() must route through search_exchanges_fts (DB-backed)."""
 
-    def test_search_in_preview(self):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.conn = make_db(self.tmp)
         exchanges = [
-            {'idx': 1, 'preview': 'authentication flow', 'user_text': '', 'assistant_text': ''},
-            {'idx': 2, 'preview': 'fix the bug', 'user_text': '', 'assistant_text': ''},
+            {'idx': 1, 'timestamp': '2025-01-15T09:00:00Z',
+             'preview': 'authentication flow',
+             'user_text': 'help with authentication', 'assistant_text': 'use auth tokens'},
+            {'idx': 2, 'timestamp': '2025-01-15T10:00:00Z',
+             'preview': 'fix the bug',
+             'user_text': 'fix bug', 'assistant_text': 'no match here'},
         ]
-        results = search_exchanges(exchanges, 'authentication')
+        seed_session(self.conn, 'sess-search', exchanges=exchanges)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_search_finds_match_in_preview(self):
+        results = search_session(self.conn, 'sess-search', 'authentication')
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['idx'], 1)
 
-    def test_search_in_user_text(self):
-        exchanges = [
-            {'idx': 1, 'preview': 'hello', 'user_text': 'help with authentication', 'assistant_text': ''},
-            {'idx': 2, 'preview': 'world', 'user_text': 'fix bug', 'assistant_text': ''},
-        ]
-        results = search_exchanges(exchanges, 'authentication')
+    def test_search_finds_match_in_assistant_text(self):
+        results = search_session(self.conn, 'sess-search', 'tokens')
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['idx'], 1)
-
-    def test_search_in_assistant_text(self):
-        exchanges = [
-            {'idx': 1, 'preview': 'q', 'user_text': 'q', 'assistant_text': 'use auth tokens'},
-            {'idx': 2, 'preview': 'q', 'user_text': 'q', 'assistant_text': 'no match here'},
-        ]
-        results = search_exchanges(exchanges, 'auth')
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]['idx'], 1)
-
-    def test_search_case_insensitive(self):
-        exchanges = [
-            {'idx': 1, 'preview': 'AUTHENTICATION ISSUE', 'user_text': '', 'assistant_text': ''},
-        ]
-        results = search_exchanges(exchanges, 'authentication')
-        self.assertEqual(len(results), 1)
 
     def test_search_no_results(self):
-        exchanges = [
-            {'idx': 1, 'preview': 'login bug', 'user_text': 'login bug', 'assistant_text': 'fix login'},
-        ]
-        results = search_exchanges(exchanges, 'authentication')
+        results = search_session(self.conn, 'sess-search', 'xyzzy_not_there_ever')
         self.assertEqual(len(results), 0)
+
+    def test_search_is_scoped_to_session(self):
+        """A match in another session must not leak into this session's search."""
+        seed_session(self.conn, 'other-sess', project_hash='zzz', exchanges=[
+            {'idx': 1, 'timestamp': '2025-01-15T09:00:00Z',
+             'preview': 'unrelated', 'user_text': 'authentication elsewhere',
+             'assistant_text': ''},
+        ])
+        results = search_session(self.conn, 'sess-search', 'authentication')
+        # Only the one match in sess-search, not the one in other-sess.
+        for r in results:
+            self.assertEqual(r['session_id'], 'sess-search')
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +248,14 @@ class TestFormatSearchResults(unittest.TestCase):
             {'idx': 1, 'preview': 'auth flow', 'timestamp': '2025-01-15T09:00:00Z'},
             {'idx': 3, 'preview': 'auth token', 'timestamp': '2025-01-15T10:00:00Z'},
         ]
-        output = format_search_results(results, 'auth', 10)
+        output = format_search_results(results, 'auth')
         self.assertIn('auth', output)
         self.assertIn('2 matches', output)
         self.assertIn('auth flow', output)
         self.assertIn('auth token', output)
 
     def test_format_no_matches(self):
-        output = format_search_results([], 'xyzzy', 10)
+        output = format_search_results([], 'xyzzy')
         self.assertIn('No exchanges found', output)
         self.assertIn('xyzzy', output)
 
@@ -250,7 +268,7 @@ class TestFormatSearchResults(unittest.TestCase):
             }
             for i in range(1, 30)
         ]
-        output = format_search_results(many, 'result', 100)
+        output = format_search_results(many, 'result')
         self.assertIn('more matches', output)
 
 
@@ -312,6 +330,46 @@ class TestFindPageForTime(unittest.TestCase):
         self.assertGreaterEqual(page, 1)
         self.assertLessEqual(page, (len(exchanges) + PAGE_SIZE - 1) // PAGE_SIZE)
 
+    # --- WI-8(b): compare LOCAL time, not raw UTC ---
+
+    def test_around_matches_on_local_time_not_raw_utc(self):
+        """find_page_for_time must convert stored UTC to local before comparing.
+
+        parse_time_query returns a LOCAL-clock datetime. The stored timestamps
+        are UTC. We pick a target time that equals the LOCAL hour of one stored
+        exchange; the matched page must be the one containing that exchange,
+        not the one whose RAW UTC hour happens to match.
+        """
+        # One exchange per hour, idx 1..24, spanning a full UTC day.
+        exchanges = [
+            {
+                'idx': h + 1,
+                'preview': f'Exchange at UTC {h:02d}:00',
+                'timestamp': f'2025-06-15T{h:02d}:30:00Z',
+            }
+            for h in range(24)
+        ]
+
+        # Pick a stored exchange and compute what LOCAL hour/minute it maps to.
+        chosen = exchanges[10]  # UTC 10:30
+        chosen_local = datetime.fromisoformat(
+            chosen['timestamp'].replace('Z', '+00:00')
+        ).astimezone()
+        target = datetime.now().replace(
+            hour=chosen_local.hour, minute=chosen_local.minute,
+            second=0, microsecond=0,
+        )
+
+        page = find_page_for_time(exchanges, target)
+
+        # The chosen exchange should fall on the returned page.
+        total = len(exchanges)
+        page_exchanges = list(reversed(exchanges))
+        start = (page - 1) * PAGE_SIZE
+        page_slice = page_exchanges[start:start + PAGE_SIZE]
+        idxs_on_page = {ex['idx'] for ex in page_slice}
+        self.assertIn(chosen['idx'], idxs_on_page)
+
 
 # ---------------------------------------------------------------------------
 # DB integration: ensure show_index works end-to-end with real DB
@@ -342,16 +400,13 @@ class TestShowIndexDBIntegration(unittest.TestCase):
         self.assertIn('Session started', result)
         self.assertIn('5', result)  # total count
 
-    def test_search_exchanges_with_db_data(self):
-        from db import get_exchanges
-        exs = get_exchanges(self.conn, 'sess-show')
-        results = search_exchanges(exs, 'User message')
-        self.assertEqual(len(results), 5)  # all exchanges contain 'User message N'
+    def test_search_session_with_db_data(self):
+        # 'message' appears in every user_text ('User message N')
+        results = search_session(self.conn, 'sess-show', 'message')
+        self.assertEqual(len(results), 5)
 
-    def test_search_exchanges_no_results_with_db_data(self):
-        from db import get_exchanges
-        exs = get_exchanges(self.conn, 'sess-show')
-        results = search_exchanges(exs, 'xyzzy_not_there_ever')
+    def test_search_session_no_results_with_db_data(self):
+        results = search_session(self.conn, 'sess-show', 'xyzzy_not_there_ever')
         self.assertEqual(len(results), 0)
 
 

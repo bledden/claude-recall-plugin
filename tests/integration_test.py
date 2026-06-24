@@ -461,7 +461,7 @@ class TestHighlightConnectionInbox(unittest.TestCase):
             # ------------------------------------------------------------------ #
             conn = get_connection(self.db_path)
             insert_connection(conn, 'sess-inbox-a', 'sess-inbox-b', 'kernel work',
-                               check_mode='explicit', delivery_mode='silent')
+                               check_mode='decay', delivery_mode='silent')
             conn.close()
 
             # ------------------------------------------------------------------ #
@@ -484,14 +484,16 @@ class TestHighlightConnectionInbox(unittest.TestCase):
                           'Session B short ID should appear in inbox')
 
             # ------------------------------------------------------------------ #
-            # Step 5 — Run inbox again — should be empty (already checked)        #
+            # Step 5 — Mark read (WI-19: a plain view never clears; an explicit  #
+            #          mark_read on a decay connection does), then re-view empty #
             # ------------------------------------------------------------------ #
             conn = get_connection(self.db_path)
-            result2 = inbox(conn, 'sess-inbox-a')
+            inbox(conn, 'sess-inbox-a', mark_read=True)   # marks highlights as seen
+            result2 = inbox(conn, 'sess-inbox-a')         # plain view now empty
             conn.close()
 
             self.assertIn('No new highlights', result2,
-                          'Second inbox call should return no new highlights')
+                          'After mark_read, a subsequent inbox view should be empty')
 
         finally:
             prompt_submit.LEGACY_INDEX_FILE = original_legacy_file

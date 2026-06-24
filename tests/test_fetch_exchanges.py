@@ -1,24 +1,64 @@
 #!/usr/bin/env python3
 """Unit tests for fetch_exchanges.py — DB-backed version."""
 
+import io
 import os
 import sys
 import tempfile
 import shutil
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
 from db import get_connection, insert_session, insert_exchanges
+import fetch_exchanges
 from fetch_exchanges import (
     parse_last_n,
     format_exchanges,
     get_session_dates,
     format_cross_project_results,
+    _build_arg_parser,
 )
 from utils import MAX_CHARS_PER_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# Helper: run main() against a temp DB by patching get_connection + argv
+# ---------------------------------------------------------------------------
+
+def run_main(conn, argv):
+    """Invoke fetch_exchanges.main() with a patched connection and argv.
+
+    Returns captured stdout. SAFETY: get_connection is monkeypatched so main()
+    NEVER touches the real database — it always uses the temp-DB `conn` passed in.
+    The connection is wrapped so main()'s `conn.close()` does not close the
+    test-owned connection.
+    """
+    class _NoCloseConn:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def close(self):
+            pass  # keep the test-owned connection open
+
+    orig_get_conn = fetch_exchanges.get_connection
+    orig_argv = sys.argv
+    buf = io.StringIO()
+    try:
+        fetch_exchanges.get_connection = lambda *a, **k: _NoCloseConn(conn)
+        sys.argv = ['fetch_exchanges.py'] + list(argv)
+        with redirect_stdout(buf):
+            fetch_exchanges.main()
+    finally:
+        fetch_exchanges.get_connection = orig_get_conn
+        sys.argv = orig_argv
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +469,107 @@ class TestGetSessionDates(unittest.TestCase):
     def test_empty_exchanges(self):
         result = get_session_dates([])
         self.assertEqual(result, [])
+
+
+# ---------------------------------------------------------------------------
+# WI-7: reject last<=0 instead of returning ALL exchanges labeled 'last0'
+# ---------------------------------------------------------------------------
+
+class TestLastNonPositiveRejected(unittest.TestCase):
+    """'last0' (and any last<=0) must be rejected, not return all exchanges."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.conn = make_db(self.tmp)
+        seed_session(self.conn, 'sess-1', exchanges=SAMPLE_EXCHANGES)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_last0_is_invalid_and_returns_nothing(self):
+        out = run_main(self.conn, ['--session', 'sess-1', 'last0'])
+        self.assertIn('Invalid format', out)
+        # Must NOT fetch/label exchanges as 'last0'
+        self.assertNotIn('Fetched', out)
+        self.assertNotIn('Exchange #', out)
+
+    def test_negative_last_is_invalid(self):
+        # 'last-3' must also be rejected (not parsed as returning all)
+        out = run_main(self.conn, ['--session', 'sess-1', 'last-3'])
+        self.assertIn('Invalid format', out)
+        self.assertNotIn('Fetched', out)
+
+    def test_last3_still_works(self):
+        # Regression guard: a valid positive N still fetches.
+        out = run_main(self.conn, ['--session', 'sess-1', 'last3'])
+        self.assertIn('Fetched 3 exchange(s)', out)
+
+
+# ---------------------------------------------------------------------------
+# WI-9: scope flags (--all/--global/--project) mutually exclusive in argparse
+# ---------------------------------------------------------------------------
+
+class TestScopeFlagsMutuallyExclusive(unittest.TestCase):
+    """--all / --global / --project must conflict via an argparse group."""
+
+    def test_global_and_all_conflict(self):
+        parser = _build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['search', 'auth', '--global', '--all'])
+
+    def test_global_and_project_conflict(self):
+        parser = _build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['search', 'auth', '--global', '--project', 'foo'])
+
+    def test_all_and_project_conflict(self):
+        parser = _build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['search', 'auth', '--all', '--project', 'foo'])
+
+    def test_single_scope_flag_is_accepted(self):
+        # Regression guard: any single scope flag still parses fine.
+        parser = _build_arg_parser()
+        args = parser.parse_args(['search', 'auth', '--global'])
+        self.assertTrue(args.scope_global)
+        args = parser.parse_args(['search', 'auth', '--all'])
+        self.assertTrue(args.scope_all)
+        args = parser.parse_args(['search', 'auth', '--project', 'foo'])
+        self.assertEqual(args.project, 'foo')
+
+
+# ---------------------------------------------------------------------------
+# WI-28: dead-code removal must not change live-path behavior
+# ---------------------------------------------------------------------------
+
+class TestDeadCodeRemovalBehavior(unittest.TestCase):
+    """Behavior of live paths is preserved after removing unreachable code."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.conn = make_db(self.tmp)
+        seed_session(self.conn, 'sess-1', exchanges=SAMPLE_EXCHANGES)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_empty_search_term_still_prompts(self):
+        # The 'and not args.tag' guard removal must not change this message.
+        out = run_main(self.conn, ['--session', 'sess-1', 'search'])
+        self.assertIn('specify a search term', out)
+
+    def test_session_search_returns_results(self):
+        out = run_main(self.conn, ['--session', 'sess-1', 'search', 'authentication'])
+        self.assertIn('authentication', out.lower())
+        self.assertIn('Fetched', out)
+
+    def test_no_args_defaults_to_last5(self):
+        # Removing the duplicate raw_args default must keep the last5 default.
+        out = run_main(self.conn, ['--session', 'sess-1'])
+        self.assertIn('Fetched', out)
+        self.assertIn('last5', out)
 
 
 if __name__ == '__main__':

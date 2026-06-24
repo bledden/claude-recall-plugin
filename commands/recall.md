@@ -1,6 +1,6 @@
 ---
 description: Recover context from recent conversation
-argument-hint: "[last5 | around TIME | search KEYWORD [--all|--global] | sessions | tags | stats | ...]"
+argument-hint: "[lastN | around TIME | search KEYWORD [--all|--global|--project NAME|--tag NAME] | sessions [--all|--project NAME] | session ID ARGS | tag NAME | tags | stats | highlight | connect | disconnect | inbox | config | prune | export | ... (see full list below)]"
 allowed-tools: Bash(python3:*), AskUserQuestion
 ---
 
@@ -12,8 +12,7 @@ The user wants to recover context from this conversation.
 
 **FIRST**, check if `$ARGUMENTS` contains a quick command and run it directly, then stop:
 
-- `last5` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $RECALL_SESSION_ID last5`
-- `last10`, etc. → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $RECALL_SESSION_ID last10`
+- `lastN` (e.g. `last5`, `last10`, `last20` — any positive N) → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $RECALL_SESSION_ID lastN`
 - `around <time>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $RECALL_SESSION_ID around <time>`
 - `search <keyword>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $RECALL_SESSION_ID search <keyword>`
 - `search <keyword> --all` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py --session $RECALL_SESSION_ID --project-hash $RECALL_PROJECT_HASH search <keyword> --all`
@@ -30,13 +29,18 @@ The user wants to recover context from this conversation.
 - `stats` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py stats`
 - `prune --session <id>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py prune --session <id>`
 - `prune --before <date>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py prune --before <date>`
-- `export --session <id> --json` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py export --session <id>`
+- `export --session <id>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py export --session <id>` (always emits JSON)
 - `highlight "summary"` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/highlight.py $RECALL_SESSION_ID "summary"`
 - `connect <session-id> "topic"` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_connections.py connect $RECALL_SESSION_ID <session-id> "topic"`
 - `connect --latest "topic"` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_connections.py connect-latest $RECALL_SESSION_ID $RECALL_PROJECT_HASH "topic"`
 - `disconnect <session-id>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_connections.py disconnect $RECALL_SESSION_ID <session-id>`
 - `inbox` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_connections.py inbox $RECALL_SESSION_ID`
 - `config <key> <value>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_connections.py config $RECALL_SESSION_ID <key> <value>`
+
+**Notes on `--project`:**
+
+- For `search ... --project <name>` and `sessions --project <name>`, `<name>` is matched as an **unanchored substring** against the stored project path (case-sensitive `LIKE '%name%'`). Any session whose project path contains the substring matches.
+- For `tags --project <hash>`, the argument is a **project HASH** (exact match), not a name/path. This is distinct from `sessions --project <name>`, which takes a name/path.
 
 If no arguments: Continue to Step 2.
 

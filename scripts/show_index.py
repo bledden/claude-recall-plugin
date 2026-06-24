@@ -27,7 +27,6 @@ from utils import (
     format_short_date,
     parse_time_query,
     get_date_from_timestamp,
-    search_in_text,
     PAGE_SIZE,
 )
 
@@ -57,7 +56,12 @@ def find_page_for_time(exchanges: List[Dict], target_time: datetime) -> int:
 
     for i, ex in enumerate(exchanges):
         try:
-            ex_time = datetime.fromisoformat(ex['timestamp'].replace('Z', '+00:00'))
+            # Stored timestamps are UTC; the target (from parse_time_query) is a
+            # LOCAL-clock time and display is local. Convert to local before
+            # comparing hour/minute so --around matches what the user sees.
+            ex_time = datetime.fromisoformat(
+                ex['timestamp'].replace('Z', '+00:00')
+            ).astimezone()
             ex_minutes = ex_time.hour * 60 + ex_time.minute
             target_minutes = target_time.hour * 60 + target_time.minute
             diff = abs(ex_minutes - target_minutes)
@@ -73,27 +77,24 @@ def find_page_for_time(exchanges: List[Dict], target_time: datetime) -> int:
     return page
 
 
-def search_exchanges(exchanges: List[Dict], keyword: str) -> List[Dict]:
-    """Search exchanges for keyword in preview AND full content (case-insensitive).
+def search_session(conn, session_id: str, keyword: str,
+                   limit: int = 100) -> List[Dict]:
+    """Search a session's exchanges via the FTS5 index.
+
+    Routes through db.search_exchanges_fts (consistent with how the rest of the
+    DB layer queries exchanges) rather than scanning rows in Python. The FTS
+    index covers preview, user_text and assistant_text.
 
     Args:
-        exchanges: List of exchange dicts.
-        keyword: Search keyword.
+        conn: SQLite connection.
+        session_id: Session to restrict the search to.
+        keyword: Search query string.
+        limit: Max results to return.
 
     Returns:
-        Filtered list of matching exchanges.
+        List of matching exchange dicts (ordered by idx via the FTS query).
     """
-    results = []
-    for ex in exchanges:
-        if search_in_text(ex.get('preview') or '', keyword):
-            results.append(ex)
-            continue
-        if search_in_text(ex.get('user_text') or '', keyword):
-            results.append(ex)
-            continue
-        if search_in_text(ex.get('assistant_text') or '', keyword):
-            results.append(ex)
-    return results
+    return search_exchanges_fts(conn, keyword, session_id=session_id, limit=limit)
 
 
 def get_session_date_range(exchanges: List[Dict]) -> str:
@@ -139,6 +140,11 @@ def format_page(
 
     if not exchanges:
         return "*No exchanges found in this session.*"
+
+    # Guard out-of-range page numbers. A page < 1 would otherwise produce a
+    # negative-index slice (garbage) labeled e.g. "page -1".
+    if page < 1:
+        return f"*Invalid page number. Total pages: {total_pages}*"
 
     start_from_end = (page - 1) * PAGE_SIZE
     end_from_end = start_from_end + PAGE_SIZE
@@ -187,13 +193,12 @@ def format_page(
     return "\n".join(lines)
 
 
-def format_search_results(results: List[Dict], keyword: str, total_exchanges: int) -> str:
+def format_search_results(results: List[Dict], keyword: str) -> str:
     """Format search results as markdown.
 
     Args:
         results: Matching exchange dicts.
         keyword: The search term (for header).
-        total_exchanges: Total exchange count (for context).
 
     Returns:
         Formatted markdown string.
@@ -265,11 +270,10 @@ def main():
             print("*No exchanges found in the current session.*")
             return
 
-        # Handle search — needs full text, load all exchanges
+        # Handle search via the FTS index (no full Python scan needed).
         if args.search:
-            exchanges = get_exchanges(conn, session_id)
-            results = search_exchanges(exchanges, args.search)
-            print(format_search_results(results, args.search, total_exchanges))
+            results = search_session(conn, session_id, args.search)
+            print(format_search_results(results, args.search))
             return
 
         # Handle time-based navigation — needs timestamps, load all exchanges

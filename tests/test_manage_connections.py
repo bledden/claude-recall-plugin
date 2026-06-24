@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for manage_connections.py — connect, inbox, and config."""
 
+import inspect
 import os
 import shutil
 import sys
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
+import manage_connections
 from db import (
     get_connection,
     insert_session,
@@ -191,28 +193,28 @@ class TestInbox(unittest.TestCase):
         result = inbox(self.conn, self.watcher)
         self.assertIn('No new highlights', result)
 
-    def test_inbox_updates_last_checked_at_after_viewing(self):
-        """inbox() updates last_checked_at on all connections."""
-        connect(self.conn, self.watcher, self.target, 'topic')
+    def test_inbox_mark_read_updates_last_checked_at_after_viewing(self):
+        """inbox(mark_read=True) updates last_checked_at on decay connections."""
+        connect(self.conn, self.watcher, self.target, 'topic', check_mode='decay')
         connections_before = get_connections(self.conn, self.watcher)
         self.assertIsNone(connections_before[0]['last_checked_at'])
 
-        inbox(self.conn, self.watcher)
+        inbox(self.conn, self.watcher, mark_read=True)
 
         connections_after = get_connections(self.conn, self.watcher)
         self.assertIsNotNone(connections_after[0]['last_checked_at'])
 
-    def test_subsequent_inbox_call_shows_no_highlights(self):
-        """After checking inbox, a second call shows no new highlights."""
-        connect(self.conn, self.watcher, self.target, 'topic')
+    def test_subsequent_mark_read_inbox_call_shows_no_highlights(self):
+        """After mark_read, a second call shows no new highlights for decay conns."""
+        connect(self.conn, self.watcher, self.target, 'topic', check_mode='decay')
         _make_highlight(self.conn, self.target, 'First insight')
 
-        # First call sees the highlight
-        first_result = inbox(self.conn, self.watcher)
+        # First call (mark_read) sees the highlight and advances last_checked_at
+        first_result = inbox(self.conn, self.watcher, mark_read=True)
         self.assertIn('First insight', first_result)
 
         # Second call — no new highlights since last check
-        second_result = inbox(self.conn, self.watcher)
+        second_result = inbox(self.conn, self.watcher, mark_read=True)
         self.assertIn('No new highlights', second_result)
 
 
@@ -237,9 +239,10 @@ class TestConfig(unittest.TestCase):
 
     def test_config_sets_check_mode_on_all_connections(self):
         """config() with check_mode updates all connections for the session."""
-        result = config(self.conn, self.session, 'check_mode', 'decay')
-        self.assertIn('check_mode', result)
-        self.assertIn('decay', result)
+        message, code = config(self.conn, self.session, 'check_mode', 'decay')
+        self.assertEqual(code, 0)
+        self.assertIn('check_mode', message)
+        self.assertIn('decay', message)
 
         connections = get_connections(self.conn, self.session)
         for c in connections:
@@ -247,17 +250,19 @@ class TestConfig(unittest.TestCase):
 
     def test_config_sets_auto_highlight_in_session_config(self):
         """config() with auto_highlight writes to session metadata."""
-        result = config(self.conn, self.session, 'auto_highlight', 'true')
-        self.assertIn('auto_highlight', result)
+        message, code = config(self.conn, self.session, 'auto_highlight', 'true')
+        self.assertEqual(code, 0)
+        self.assertIn('auto_highlight', message)
 
         value = get_session_config(self.conn, self.session, 'auto_highlight')
         self.assertTrue(value)
 
     def test_config_rejects_invalid_key(self):
         """config() with an unrecognized key returns an error message."""
-        result = config(self.conn, self.session, 'nonexistent_key', 'value')
-        self.assertIn('Error', result)
-        self.assertIn('invalid config key', result)
+        message, code = config(self.conn, self.session, 'nonexistent_key', 'value')
+        self.assertNotEqual(code, 0)
+        self.assertIn('Error', message)
+        self.assertIn('invalid config key', message)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +316,290 @@ class TestFormatInbox(unittest.TestCase):
         """format_inbox returns the no-highlights sentinel for an empty list."""
         result = format_inbox([])
         self.assertEqual(result, '*No new highlights.*')
+
+
+# ---------------------------------------------------------------------------
+# WI-3: Unified vocabulary in docstrings
+# ---------------------------------------------------------------------------
+
+class TestVocabularyDocstrings(unittest.TestCase):
+    """WI-3: module + connect docstrings must use canonical vocabulary."""
+
+    def test_module_docstring_has_no_legacy_terms(self):
+        """Module docstring must not reference legacy 'auto'/'notify' modes."""
+        doc = manage_connections.__doc__ or ''
+        self.assertNotIn("'auto'", doc)
+        self.assertNotIn("'notify'", doc)
+
+    def test_connect_docstring_uses_canonical_terms(self):
+        """connect() docstring documents explicit/decay and silent/inject."""
+        doc = connect.__doc__ or ''
+        self.assertNotIn("'auto'", doc)
+        self.assertNotIn("'notify'", doc)
+        self.assertIn('explicit', doc)
+        self.assertIn('decay', doc)
+        self.assertIn('silent', doc)
+        self.assertIn('inject', doc)
+
+    def test_connect_latest_docstring_uses_canonical_terms(self):
+        """connect_latest() docstring must not reference legacy terms."""
+        doc = connect_latest.__doc__ or ''
+        self.assertNotIn("'auto'", doc)
+        self.assertNotIn("'notify'", doc)
+
+
+# ---------------------------------------------------------------------------
+# WI-17: optional check_mode/delivery_mode flags on connect / connect-latest
+# ---------------------------------------------------------------------------
+
+class TestConnectModeFlags(unittest.TestCase):
+    """WI-17: connect()/connect_latest() accept mode overrides at creation."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test_modeflags.db')
+        self.conn = get_connection(self.db_path)
+        self.watcher = _make_session(self.conn, 'watcher-mf-001')
+        self.target = _make_session(self.conn, 'target-mf-001')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_connect_persists_custom_modes(self):
+        """connect() with check_mode/delivery_mode persists them on the row."""
+        connect(self.conn, self.watcher, self.target, 'topic',
+                check_mode='decay', delivery_mode='inject')
+        c = get_connections(self.conn, self.watcher)[0]
+        self.assertEqual(c['check_mode'], 'decay')
+        self.assertEqual(c['delivery_mode'], 'inject')
+
+    def test_connect_defaults_are_explicit_silent(self):
+        """connect() defaults remain explicit/silent."""
+        connect(self.conn, self.watcher, self.target, 'topic')
+        c = get_connections(self.conn, self.watcher)[0]
+        self.assertEqual(c['check_mode'], 'explicit')
+        self.assertEqual(c['delivery_mode'], 'silent')
+
+
+class TestArgparseDispatch(unittest.TestCase):
+    """WI-17: main() uses argparse — --help and bad subcommands behave."""
+
+    def test_build_parser_exists(self):
+        """A build_parser() helper must exist for argparse dispatch."""
+        self.assertTrue(hasattr(manage_connections, 'build_parser'))
+
+    def test_help_flag_exits_zero(self):
+        """--help triggers argparse SystemExit(0)."""
+        parser = manage_connections.build_parser()
+        with self.assertRaises(SystemExit) as ctx:
+            parser.parse_args(['--help'])
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_unknown_subcommand_exits_nonzero(self):
+        """An unknown subcommand exits with a non-zero (usage) error."""
+        parser = manage_connections.build_parser()
+        with self.assertRaises(SystemExit) as ctx:
+            parser.parse_args(['bogus-command'])
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_connect_parses_mode_flags(self):
+        """connect subcommand accepts --check-mode / --delivery-mode."""
+        parser = manage_connections.build_parser()
+        ns = parser.parse_args(
+            ['connect', 'w', 't', 'topic',
+             '--check-mode', 'decay', '--delivery-mode', 'inject'])
+        self.assertEqual(ns.check_mode, 'decay')
+        self.assertEqual(ns.delivery_mode, 'inject')
+
+    def test_connect_latest_parses_mode_flags(self):
+        """connect-latest subcommand accepts --check-mode / --delivery-mode."""
+        parser = manage_connections.build_parser()
+        ns = parser.parse_args(
+            ['connect-latest', 'w', 'hash', 'topic',
+             '--check-mode', 'decay'])
+        self.assertEqual(ns.check_mode, 'decay')
+
+
+# ---------------------------------------------------------------------------
+# WI-18: disconnect reports 'no such connection' when nothing removed
+# ---------------------------------------------------------------------------
+
+class TestDisconnectRowcount(unittest.TestCase):
+    """WI-18: disconnect must not claim success when nothing was removed."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test_dc_rowcount.db')
+        self.conn = get_connection(self.db_path)
+        self.watcher = _make_session(self.conn, 'watcher-dcr-001')
+        self.target = _make_session(self.conn, 'target-dcr-001')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_disconnect_nonexistent_reports_no_such_connection(self):
+        """Disconnecting a connection that does not exist reports no such connection."""
+        result = disconnect(self.conn, self.watcher, self.target)
+        self.assertIn('no such connection', result.lower())
+        self.assertNotIn('Disconnected', result)
+
+    def test_disconnect_existing_still_confirms(self):
+        """Disconnecting a real connection still confirms success."""
+        connect(self.conn, self.watcher, self.target, 'topic')
+        result = disconnect(self.conn, self.watcher, self.target)
+        self.assertIn('Disconnected', result)
+
+
+# ---------------------------------------------------------------------------
+# WI-19: inbox idempotency — plain inbox does NOT advance counters
+# ---------------------------------------------------------------------------
+
+class TestInboxIdempotency(unittest.TestCase):
+    """WI-19: plain inbox is a read-only VIEW; --mark-read advances state."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test_inbox_idem.db')
+        self.conn = get_connection(self.db_path)
+        self.watcher = _make_session(self.conn, 'watcher-idem-001')
+        self.target = _make_session(self.conn, 'target-idem-001')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_plain_inbox_does_not_advance_counters(self):
+        """Plain inbox() leaves check_counter and last_checked_at untouched."""
+        connect(self.conn, self.watcher, self.target, 'topic',
+                check_mode='decay')
+        _make_highlight(self.conn, self.target, 'Insight A')
+
+        inbox(self.conn, self.watcher)
+
+        c = get_connections(self.conn, self.watcher)[0]
+        self.assertIsNone(c['last_checked_at'])
+        self.assertEqual(c.get('check_counter', 0), 0)
+
+    def test_plain_inbox_is_idempotent_shows_highlights_twice(self):
+        """Without mark_read, highlights remain visible on a second call."""
+        connect(self.conn, self.watcher, self.target, 'topic', check_mode='decay')
+        _make_highlight(self.conn, self.target, 'Repeatable insight')
+
+        first = inbox(self.conn, self.watcher)
+        second = inbox(self.conn, self.watcher)
+        self.assertIn('Repeatable insight', first)
+        self.assertIn('Repeatable insight', second)
+
+    def test_mark_read_advances_decay_connection(self):
+        """inbox(mark_read=True) advances counter/last_checked_at for decay conns."""
+        connect(self.conn, self.watcher, self.target, 'topic', check_mode='decay')
+        _make_highlight(self.conn, self.target, 'Insight B')
+
+        inbox(self.conn, self.watcher, mark_read=True)
+
+        c = get_connections(self.conn, self.watcher)[0]
+        self.assertIsNotNone(c['last_checked_at'])
+        self.assertEqual(c.get('check_counter', 0), 1)
+
+    def test_mark_read_does_not_advance_explicit_connection(self):
+        """Even with mark_read, explicit-mode connections are never advanced."""
+        connect(self.conn, self.watcher, self.target, 'topic',
+                check_mode='explicit')
+        _make_highlight(self.conn, self.target, 'Insight C')
+
+        inbox(self.conn, self.watcher, mark_read=True)
+
+        c = get_connections(self.conn, self.watcher)[0]
+        self.assertIsNone(c['last_checked_at'])
+        self.assertEqual(c.get('check_counter', 0), 0)
+
+
+# ---------------------------------------------------------------------------
+# WI-20: config docstring documents all 6 keys
+# ---------------------------------------------------------------------------
+
+class TestConfigDocstring(unittest.TestCase):
+    """WI-20: config() docstring must document all six valid config keys."""
+
+    def test_docstring_lists_all_keys(self):
+        """All six VALID_CONFIG_KEYS appear in the config() docstring."""
+        doc = config.__doc__ or ''
+        for key in ('check_mode', 'delivery_mode', 'auto_highlight',
+                    'skill_enabled', 'detection_signals', 'auto_run_highlight'):
+            self.assertIn(key, doc, f"{key} missing from config docstring")
+
+    def test_docstring_mentions_persistence_locations(self):
+        """Docstring explains connection-row vs sessions.metadata persistence."""
+        doc = (config.__doc__ or '').lower()
+        self.assertIn('connection', doc)
+        self.assertIn('metadata', doc)
+
+
+# ---------------------------------------------------------------------------
+# WI-21: config persistence reporting and validation
+# ---------------------------------------------------------------------------
+
+class TestConfigPersistenceReporting(unittest.TestCase):
+    """WI-21: config must warn (non-zero exit) when nothing was persisted."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test_cfg_persist.db')
+        self.conn = get_connection(self.db_path)
+        self.session = _make_session(self.conn, 'cfg-persist-001')
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_check_mode_with_no_connections_warns(self):
+        """check_mode on a session with no connections reports a warning."""
+        result, code = config(self.conn, self.session, 'check_mode', 'decay')
+        self.assertNotEqual(code, 0)
+        self.assertIn('0 connection', result)
+
+    def test_check_mode_with_connections_succeeds(self):
+        """check_mode succeeds (exit 0) when connections exist."""
+        target = _make_session(self.conn, 'cfg-persist-target')
+        connect(self.conn, self.session, target, 'topic')
+        result, code = config(self.conn, self.session, 'check_mode', 'decay')
+        self.assertEqual(code, 0)
+        for c in get_connections(self.conn, self.session):
+            self.assertEqual(c['check_mode'], 'decay')
+
+    def test_metadata_key_missing_session_warns(self):
+        """auto_highlight on a missing session warns and exits non-zero."""
+        result, code = config(self.conn, 'no-such-session', 'auto_highlight', 'true')
+        self.assertNotEqual(code, 0)
+        self.assertIn('not found', result.lower())
+
+    def test_metadata_key_existing_session_succeeds(self):
+        """auto_highlight on an existing session persists and exits 0."""
+        result, code = config(self.conn, self.session, 'auto_highlight', 'true')
+        self.assertEqual(code, 0)
+        self.assertTrue(get_session_config(self.conn, self.session, 'auto_highlight'))
+
+    def test_bool_key_rejects_unrecognized_token(self):
+        """A non true/false token for a bool key is rejected with non-zero exit."""
+        result, code = config(self.conn, self.session, 'auto_highlight', 'maybe')
+        self.assertNotEqual(code, 0)
+        self.assertIn('Error', result)
+
+    def test_invalid_key_returns_nonzero(self):
+        """An invalid config key returns a non-zero exit code."""
+        result, code = config(self.conn, self.session, 'bogus_key', 'x')
+        self.assertNotEqual(code, 0)
+        self.assertIn('Error', result)
+
+    def test_string_metadata_key_succeeds(self):
+        """detection_signals (string metadata) persists on existing session."""
+        result, code = config(self.conn, self.session, 'detection_signals', 'foo,bar')
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            get_session_config(self.conn, self.session, 'detection_signals'),
+            'foo,bar')
 
 
 if __name__ == '__main__':

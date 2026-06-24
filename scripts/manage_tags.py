@@ -16,41 +16,66 @@ import os
 import sqlite3
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 # Allow running from any working directory
 sys.path.insert(0, os.path.dirname(__file__))
 
 from db import get_connection, insert_tag, get_tags
+from utils import compute_project_hash
 
 
 # ---------------------------------------------------------------------------
 # Core functions
 # ---------------------------------------------------------------------------
 
-def add_tag(conn: sqlite3.Connection, tag: str, session_id: str, exchange_idx: int = None) -> None:
+def add_tag(conn: sqlite3.Connection, tag: str, session_id: str, exchange_idx: int = None) -> bool:
     """Add a manual tag to a session or a specific exchange.
 
-    Delegates to insert_tag() with source='manual'.  For session-level tags
-    (exchange_idx=None) an explicit duplicate check is performed first because
-    SQLite's UNIQUE constraint treats NULL as distinct from NULL, so
-    INSERT OR IGNORE alone cannot prevent duplicates when exchange_idx is NULL.
+    For session-level tags (exchange_idx=None) an explicit duplicate check is
+    required because SQLite's UNIQUE constraint treats NULL as distinct from
+    NULL, so INSERT OR IGNORE alone cannot prevent duplicates when exchange_idx
+    is NULL. The check and the insert are wrapped in a single ``BEGIN IMMEDIATE``
+    transaction so a concurrent writer cannot slip a duplicate in between them
+    (no TOCTOU gap).
 
     Args:
         conn: SQLite connection.
         tag: Tag string to attach.
         session_id: Target session ID.
         exchange_idx: If provided, scopes the tag to that exchange index.
+
+    Returns:
+        True if a new tag row was inserted, False if the tag already existed.
     """
-    if exchange_idx is None:
-        # Guard against NULL-uniqueness gap in SQLite
-        existing = conn.execute(
-            "SELECT 1 FROM tags WHERE tag = ? AND session_id = ? AND exchange_idx IS NULL",
-            (tag, session_id),
-        ).fetchone()
-        if existing:
-            return
-    insert_tag(conn, tag, session_id, exchange_idx=exchange_idx, source='manual')
+    now = datetime.now(timezone.utc).isoformat()
+    # Wrap check + insert in an IMMEDIATE transaction to close the TOCTOU gap.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if exchange_idx is None:
+            # Guard against NULL-uniqueness gap in SQLite with an explicit check.
+            existing = conn.execute(
+                "SELECT 1 FROM tags WHERE tag = ? AND session_id = ? "
+                "AND exchange_idx IS NULL",
+                (tag, session_id),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                return False
+
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO tags "
+            "(tag, session_id, exchange_idx, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (tag, session_id, exchange_idx, 'manual', now),
+        )
+        inserted = cur.rowcount > 0
+        conn.commit()
+        return inserted
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def list_tags(conn: sqlite3.Connection, project_hash: str = None) -> List[Dict]:
@@ -64,6 +89,53 @@ def list_tags(conn: sqlite3.Connection, project_hash: str = None) -> List[Dict]:
         List of tag dicts.
     """
     return get_tags(conn, project_hash=project_hash)
+
+
+def resolve_project_filter(project: Optional[str]) -> Optional[str]:
+    """Normalize a --project value into a project HASH for filtering.
+
+    ``list --project`` filters on ``sessions.project_hash``, which is a 16-char
+    hex hash, not a path. Passing a path used to silently yield 'No tags found.'
+    To make the CLI forgiving, this accepts either form:
+
+    * ``None``           -> ``None`` (no filtering)
+    * a project HASH     -> returned unchanged
+    * a filesystem PATH  -> resolved to its project hash via
+      ``compute_project_hash`` (mirrors how the hooks derive the hash)
+
+    A value is treated as a path (rather than a hash) when it looks like one:
+    it contains a path separator or a ``~``/``.`` prefix, or it is not a bare
+    16-char lowercase-hex string.
+
+    Args:
+        project: The raw --project argument, or None.
+
+    Returns:
+        A project hash suitable for ``list_tags(project_hash=...)``, or None.
+    """
+    if project is None:
+        return None
+    candidate = project.strip()
+    if not candidate:
+        return None
+    if _looks_like_path(candidate):
+        return compute_project_hash(candidate)
+    return candidate
+
+
+def _looks_like_path(value: str) -> bool:
+    """Heuristic: does this --project value look like a filesystem path?
+
+    A 16-char lowercase-hex string is treated as an already-computed hash;
+    anything containing a separator/``~``, or that isn't valid hex of the
+    expected length, is treated as a path.
+    """
+    if os.sep in value or '/' in value or value.startswith('~') or value.startswith('.'):
+        return True
+    hex_digits = set('0123456789abcdef')
+    if len(value) == 16 and all(c in hex_digits for c in value.lower()):
+        return False
+    return True
 
 
 def search_by_tag(conn: sqlite3.Connection, tag: str) -> List[Dict]:
@@ -168,8 +240,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # list
     list_p = sub.add_parser('list', help='List all tags.')
-    list_p.add_argument('--project', metavar='PROJECT_HASH',
-                        help='Filter to a specific project hash.')
+    list_p.add_argument(
+        '--project', metavar='PROJECT_HASH_OR_PATH',
+        help=(
+            'Filter to a specific project. Accepts a project HASH '
+            '(16-char hex, as stored in sessions.project_hash) or a '
+            'filesystem PATH, which is resolved to its hash automatically.'
+        ),
+    )
 
     # search
     search_p = sub.add_parser('search', help='Find sessions by tag.')
@@ -185,12 +263,19 @@ def main() -> None:
     conn = get_connection()
     try:
         if args.command == 'add':
-            add_tag(conn, args.tag, args.session_id, exchange_idx=args.exchange_idx)
+            inserted = add_tag(conn, args.tag, args.session_id, exchange_idx=args.exchange_idx)
             scope = f' (exchange {args.exchange_idx})' if args.exchange_idx is not None else ''
-            print(f"Tag '{args.tag}' added to session {args.session_id}{scope}.")
+            if inserted:
+                print(f"Tag '{args.tag}' added to session {args.session_id}{scope}.")
+            else:
+                print(
+                    f"Tag '{args.tag}' already present on session "
+                    f"{args.session_id}{scope}; nothing to do."
+                )
 
         elif args.command == 'list':
-            tags = list_tags(conn, project_hash=args.project)
+            project_hash = resolve_project_filter(args.project)
+            tags = list_tags(conn, project_hash=project_hash)
             print(format_tag_list(tags))
 
         elif args.command == 'search':

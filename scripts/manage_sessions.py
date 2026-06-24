@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from typing import Dict, List
 
 # Allow running from any working directory
@@ -27,6 +28,7 @@ from db import (
     prune_before_date,
     get_stats,
     export_session_json,
+    get_session,
 )
 from manage_tags import get_tags_by_session
 from utils import format_date, format_short_date
@@ -130,6 +132,60 @@ def format_export(data: Dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Validated operations
+# ---------------------------------------------------------------------------
+
+def normalize_before_date(value: str) -> str:
+    """Validate and normalize a --before date for pruning (WI-14).
+
+    Accepts a bare ISO date (YYYY-MM-DD) or a full ISO datetime and returns a
+    normalized ISO string suitable for comparison against stored ``started_at``
+    values.  Rejects anything ``datetime.fromisoformat`` cannot parse, so a
+    destructive ``DELETE ... WHERE started_at < ?`` is never run with an
+    unvalidated raw string.
+
+    Args:
+        value: The raw --before argument.
+
+    Returns:
+        Normalized ISO-8601 string.
+
+    Raises:
+        ValueError: If ``value`` is empty or not a parseable ISO date/datetime.
+    """
+    if value is None or not str(value).strip():
+        raise ValueError('date is empty')
+    # Tolerate a trailing 'Z' (UTC) which older Python fromisoformat rejects.
+    candidate = str(value).strip()
+    normalized = candidate[:-1] + '+00:00' if candidate.endswith('Z') else candidate
+    # Raises ValueError on anything unparseable.
+    datetime.fromisoformat(normalized)
+    return candidate
+
+
+def export_session(conn, session_id: str) -> Dict:
+    """Export a session, raising if it does not exist (WI-15).
+
+    Unlike ``export_session_json``, which returns a misleading empty document
+    (``{"exchanges": [], "tags": []}``) for a nonexistent session, this raises
+    so callers can report an error instead of emitting an empty doc.
+
+    Args:
+        conn: SQLite connection.
+        session_id: Session ID to export.
+
+    Returns:
+        The export dict from ``export_session_json``.
+
+    Raises:
+        LookupError: If no session with ``session_id`` exists.
+    """
+    if get_session(conn, session_id) is None:
+        raise LookupError(f"session '{session_id}' not found")
+    return export_session_json(conn, session_id)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -195,11 +251,28 @@ def main() -> None:
                 prune_session(conn, args.session)
                 print(f"Session '{args.session}' pruned.")
             elif args.before:
-                count = prune_before_date(conn, args.before)
-                print(f'{count} session(s) pruned before {args.before}.')
+                try:
+                    before = normalize_before_date(args.before)
+                except ValueError:
+                    print(
+                        f"Error: invalid --before date '{args.before}'. "
+                        "Expected an ISO date (YYYY-MM-DD) or datetime "
+                        "(YYYY-MM-DDTHH:MM:SS).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                count = prune_before_date(conn, before)
+                print(f'{count} session(s) pruned before {before}.')
 
         elif args.command == 'export':
-            data = export_session_json(conn, args.session)
+            try:
+                data = export_session(conn, args.session)
+            except LookupError:
+                print(
+                    f"Error: session '{args.session}' not found.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             print(format_export(data))
 
         elif args.command == 'stats':

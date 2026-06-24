@@ -199,13 +199,18 @@ def _build_arg_parser():
     parser.add_argument('--session', metavar='SESSION_ID',
                         help='Session ID to query (overrides RECALL_SESSION_ID env var).')
     parser.add_argument('--project-hash', metavar='HASH',
-                        help='Project hash for --all scope searches.')
-    parser.add_argument('--all', dest='scope_all', action='store_true',
-                        help='Search across all sessions in the current project.')
-    parser.add_argument('--global', dest='scope_global', action='store_true',
-                        help='Search across all projects.')
-    parser.add_argument('--project', metavar='NAME',
-                        help='Search sessions whose project path contains NAME.')
+                        help='Project hash for --all scope searches. '
+                             'Only affects --all; ignored by --global and --project.')
+    # Search scope flags are mutually exclusive: only one of --all / --global /
+    # --project may be supplied. argparse errors on conflict rather than
+    # silently resolving by precedence.
+    scope_group = parser.add_mutually_exclusive_group()
+    scope_group.add_argument('--all', dest='scope_all', action='store_true',
+                             help='Search across all sessions in the current project.')
+    scope_group.add_argument('--global', dest='scope_global', action='store_true',
+                             help='Search across all projects.')
+    scope_group.add_argument('--project', metavar='NAME',
+                             help='Search sessions whose project path contains NAME.')
     parser.add_argument('--tag', metavar='TAG',
                         help='Filter/search by tag name (delegates to manage_tags).')
     parser.add_argument('command', nargs='?', default='last5',
@@ -242,11 +247,10 @@ def main():
     # Split sys.argv into known args so positional 'rest' accumulates correctly
     parser = _build_arg_parser()
 
-    # Default to last5 if no args
-    raw_args = sys.argv[1:] if len(sys.argv) > 1 else ['last5']
-
+    # When no positional command is given, argparse applies the 'command'
+    # default ('last5'), so no separate raw_args default is needed.
     try:
-        args = parser.parse_args(raw_args)
+        args = parser.parse_args(sys.argv[1:])
     except SystemExit:
         return
 
@@ -282,7 +286,9 @@ def main():
         # Handle "search KEYWORD --global / --all / --project" modes
         # ------------------------------------------------------------------
         if command == 'search':
-            if not rest and not args.tag:
+            # NB: args.tag is already handled (with a return) in the tag branch
+            # above, so it is always falsy here — no need to re-check it.
+            if not rest:
                 print("*Please specify a search term, e.g., 'search authentication'*")
                 return
 
@@ -346,10 +352,8 @@ def main():
                 print("*Search looks in both user prompts AND assistant responses.*")
                 return
 
-            if len(results) > 10:
-                print(f"*Found many matches for '{keyword}', showing 10 most recent:*\n")
-                results = results[:10]
-
+            # NB: search_exchanges_fts already caps at limit=10, so no further
+            # trimming is needed here.
             print(f"*Fetched {len(results)} exchange(s) (search '{keyword}'):*\n")
             print(format_exchanges(results, f"search '{keyword}'"))
             return
@@ -369,7 +373,10 @@ def main():
 
         # Handle "lastN"
         if command.startswith('last'):
-            if not command[4:].isdigit():
+            # Reject non-numeric and non-positive N (e.g. 'last', 'last0',
+            # 'last-3'). 'last0' passes isdigit() but n<=0 must NOT fall through
+            # to get_exchanges(last_n=0), which would return ALL exchanges.
+            if not command[4:].isdigit() or int(command[4:]) <= 0:
                 print(f"*Invalid format: {command}. Try 'last5' or 'last10'.*")
                 return
             n = int(command[4:])

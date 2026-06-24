@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Unit tests for manage_sessions.py — session management functions."""
 
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
@@ -16,6 +18,8 @@ from manage_sessions import (
     format_session_list,
     format_stats,
     format_export,
+    normalize_before_date,
+    export_session,
 )
 
 
@@ -218,6 +222,78 @@ class TestFormatExport(unittest.TestCase):
         parsed = json.loads(output)
         self.assertEqual(parsed['session_id'], 'x')
         self.assertEqual(parsed['exchanges'], [])
+
+
+class TestNormalizeBeforeDate(unittest.TestCase):
+    """Tests for normalize_before_date() — WI-14 input validation."""
+
+    def test_accepts_plain_date(self):
+        """A bare ISO date (YYYY-MM-DD) is accepted and returned normalized."""
+        result = normalize_before_date('2026-01-01')
+        # Round-trips through datetime.fromisoformat without raising.
+        self.assertIsInstance(result, str)
+        self.assertIn('2026-01-01', result)
+
+    def test_accepts_full_datetime(self):
+        """A full ISO datetime is accepted."""
+        result = normalize_before_date('2026-01-01T10:30:00')
+        self.assertIsInstance(result, str)
+        self.assertIn('2026-01-01', result)
+
+    def test_rejects_unparseable_input(self):
+        """Garbage input raises ValueError instead of being passed through."""
+        with self.assertRaises(ValueError):
+            normalize_before_date('not-a-date')
+
+    def test_rejects_empty_string(self):
+        """Empty string raises ValueError."""
+        with self.assertRaises(ValueError):
+            normalize_before_date('')
+
+    def test_rejects_sql_injection_style_input(self):
+        """A non-date string (which would otherwise be a raw string compare)
+        is rejected rather than silently used in the WHERE clause."""
+        with self.assertRaises(ValueError):
+            normalize_before_date("' OR '1'='1")
+
+
+class TestExportSession(unittest.TestCase):
+    """Tests for export_session() — WI-15 nonexistent-session handling."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test_export.db')
+        self.conn = get_connection(self.db_path)
+        insert_session(
+            self.conn, 'sess-real', '/tmp/proj', 'proj-hash',
+            '2026-01-01T00:00:00Z',
+        )
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_export_existing_session_returns_dict(self):
+        """Exporting a real session returns a dict with its fields."""
+        data = export_session(self.conn, 'sess-real')
+        self.assertEqual(data['session_id'], 'sess-real')
+        self.assertIn('exchanges', data)
+        self.assertIn('tags', data)
+
+    def test_export_nonexistent_session_raises(self):
+        """Exporting a session that does not exist raises rather than
+        returning a misleading empty document."""
+        with self.assertRaises(LookupError):
+            export_session(self.conn, 'does-not-exist')
+
+    def test_export_nonexistent_does_not_return_empty_doc(self):
+        """The empty-doc behavior (exchanges:[], tags:[]) must NOT be returned
+        for a missing session."""
+        try:
+            result = export_session(self.conn, 'missing-xyz')
+        except LookupError:
+            result = None
+        self.assertIsNone(result)
 
 
 if __name__ == '__main__':

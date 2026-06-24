@@ -8,6 +8,18 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that pers
 
 ---
 
+## Why Recall (vs. native Claude Code)
+
+Claude Code ships with `/recap`, `/resume`, and a `memory/` directory. Recall is positioned around what those do **not** cover:
+
+- **Cross-project full-text search (FTS5).** Native `/recap` and `/resume` operate within the current session/project. Recall indexes every exchange into SQLite FTS5 and searches across **all** sessions in a project (`--all`) or across **every** project (`--global`) — including past, closed sessions.
+- **Tagging.** Apply manual tags to sessions or individual exchanges, plus automatic keyword extraction, then query them across projects (`/recall tag`, `/recall tags`, `/recall search --tag`). The native `memory/` directory is freeform notes, not a queryable tag index.
+- **Highlight & connection sharing between parallel sessions.** Link two live sessions and share findings as lightweight highlights delivered to a connected session's inbox (`/recall connect`, `/recall highlight`, `/recall inbox`). Native Claude Code has no mechanism to push a finding from one session to another.
+
+If you only need to re-anchor within the current session, native `/recap` / `/resume` may be enough. Recall is for cross-session, cross-project retrieval, tagging, and sharing.
+
+---
+
 ## Requirements
 
 - **Claude Code** 2.0.x or 2.1.x (see breaking change note below for 2.1.x), or **Claude Cowork** (macOS desktop app)
@@ -164,6 +176,7 @@ This will:
 ```
 /recall                             Interactive menu (index + options)
 /recall last5                       Last 5 exchanges, current session
+/recall last10                      Last N exchanges (lastN — any positive N)
 /recall around 2pm                  Exchanges around a time
 /recall search <keyword>            Search current session
 ```
@@ -181,8 +194,13 @@ This will:
 ```
 /recall sessions                    List all sessions (current project)
 /recall sessions --all              List sessions across all projects
+/recall sessions --project <name>   List sessions in a specific project by name
 /recall session <id> last10         Browse a specific past session
 ```
+
+> **`--project` matching:** For `search --project <name>` and `sessions --project <name>`, `<name>` is matched as an **unanchored substring** of the stored project path (`LIKE '%name%'`, case-sensitive) — any session whose project path contains the substring matches.
+>
+> **`tags --project` is different:** `/recall tags --project <hash>` expects a project **HASH** (exact match), *not* a name/path. This is distinct from `sessions --project <name>`, which takes a name/path.
 
 ### Tagging
 
@@ -190,6 +208,7 @@ This will:
 /recall tag <name>                  Tag the current session
 /recall tag <name> #<exchange>      Tag a specific exchange by number
 /recall tags                        Show all tags
+/recall tags --project <hash>       Show tags for a specific project HASH (exact match)
 /recall search --tag <name>         Find sessions and exchanges by tag
 ```
 
@@ -220,7 +239,7 @@ This will:
 /recall stats                               Storage statistics
 /recall prune --session <id>                Delete a specific session
 /recall prune --before 2026-01-01           Delete all sessions before a date
-/recall export --session <id> --json        Export a session to JSON
+/recall export --session <id>               Export a session to JSON (always JSON)
 ```
 
 ### Time Format Support
