@@ -123,7 +123,7 @@ class TestManyConnections(unittest.TestCase):
     def test_last_checked_at_updated_on_all_connections_after_inbox(self):
         """inbox() sets last_checked_at on every one of the 9 connections."""
         for target in self.targets:
-            connect(self.conn, self.watcher, target, 'topic')
+            connect(self.conn, self.watcher, target, 'topic', check_mode='decay')
         for target in self.targets:
             _make_highlight(self.conn, target, f'Something from {target[:8]}')
 
@@ -134,7 +134,7 @@ class TestManyConnections(unittest.TestCase):
             self.assertIsNone(c['last_checked_at'],
                               f"Connection {c['id']} already has last_checked_at set")
 
-        inbox(self.conn, self.watcher)
+        inbox(self.conn, self.watcher, mark_read=True)
 
         conns_after = get_connections(self.conn, self.watcher)
         for c in conns_after:
@@ -144,13 +144,13 @@ class TestManyConnections(unittest.TestCase):
     def test_second_inbox_returns_empty(self):
         """After the first inbox check, a second call returns no highlights."""
         for target in self.targets:
-            connect(self.conn, self.watcher, target, 'topic')
+            connect(self.conn, self.watcher, target, 'topic', check_mode='decay')
         for target in self.targets:
             for j in range(5):
                 _make_highlight(self.conn, target, f'Insight {target[:6]}-{j}')
 
-        # First call — consumes all 45
-        first = inbox(self.conn, self.watcher)
+        # First call with mark_read — returns all 45 and marks them seen
+        first = inbox(self.conn, self.watcher, mark_read=True)
         self.assertIn('45 new highlights', first)
 
         # Second call — nothing new
@@ -204,12 +204,12 @@ class TestHighlightVolume(unittest.TestCase):
 
     def test_no_duplicates_in_inbox_output(self):
         """Running inbox twice does not double-count highlights."""
-        connect(self.conn, self.session_a, self.session_b, 'dedup test')
+        connect(self.conn, self.session_a, self.session_b, 'dedup test', check_mode='decay')
 
         for i in range(10):
             _make_highlight(self.conn, self.session_b, f'Dedup highlight {i}')
 
-        result1 = inbox(self.conn, self.session_a)
+        result1 = inbox(self.conn, self.session_a, mark_read=True)
         result2 = inbox(self.conn, self.session_a)
 
         # Count how many times a unique summary appears in combined results

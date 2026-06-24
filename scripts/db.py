@@ -23,6 +23,11 @@ DB_DIR = Path.home() / '.claude' / 'context-recall'
 DB_PATH = DB_DIR / 'recall.db'
 DB_BUSY_TIMEOUT_MS = 5000
 
+# Current on-disk schema version, tracked via SQLite's PRAGMA user_version.
+# Bump this and add a branch in _apply_migrations() whenever the schema changes
+# (e.g. the v3 vector/tier tables would be version 3).
+SCHEMA_VERSION = 2
+
 # ---------------------------------------------------------------------------
 # Schema SQL
 # ---------------------------------------------------------------------------
@@ -145,7 +150,28 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     if row is None:
         conn.executescript(_SCHEMA_SQL)
 
+    _apply_migrations(conn)
+
     return conn
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Bring the database up to SCHEMA_VERSION, stamping PRAGMA user_version.
+
+    A single PRAGMA read on each connection (cheap); only the first connection
+    to an un-versioned or out-of-date store performs a write. Future schema
+    changes add a ``if current < N: _migrate_to_vN(conn)`` branch here. The
+    current (v2) schema is created in full by ``_SCHEMA_SQL``, so bootstrapping
+    a fresh or pre-versioning DB only needs to stamp the version.
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current >= SCHEMA_VERSION:
+        return
+    # (future) per-version migrations would run here, e.g.:
+    #   if current < 3:
+    #       conn.executescript(_MIGRATION_V3_VECTORS)
+    conn.execute("PRAGMA user_version = {}".format(SCHEMA_VERSION))
+    conn.commit()
 
 # ---------------------------------------------------------------------------
 # Session CRUD
