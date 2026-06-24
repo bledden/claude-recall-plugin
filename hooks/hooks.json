@@ -1,6 +1,18 @@
 {
-  "description": "Recall hooks - indexes conversations, nudges after compaction, finalizes sessions",
+  "description": "Recall hooks - exports session env, indexes conversations, nudges on compaction, finalizes sessions",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "*",
@@ -13,7 +25,7 @@
         ]
       }
     ],
-    "PostCompact": [
+    "PreCompact": [
       {
         "matcher": "*",
         "hooks": [

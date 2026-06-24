@@ -5,6 +5,8 @@ This module contains common functions used across multiple scripts
 to avoid code duplication.
 """
 
+import hashlib
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,6 +22,20 @@ AROUND_TIME_WINDOW = 5
 
 # File paths
 LOG_FILE = Path.home() / '.claude' / 'recall-events.log'
+
+
+def compute_project_hash(project_path: str) -> str:
+    """Stable 16-char hash identifying a project by its filesystem path.
+
+    Used to group sessions by project for cross-project recall. Both the
+    SessionStart hook and the UserPromptSubmit hook derive this from the same
+    ``cwd`` value, so a given project always maps to the same hash. An empty
+    path yields ``''`` (never a hash of the empty string).
+    """
+    if not project_path:
+        return ''
+    normalized = os.path.normpath(os.path.expanduser(project_path))
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]
 
 
 def extract_text_content(message: Dict[str, Any]) -> str:

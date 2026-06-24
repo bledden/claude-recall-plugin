@@ -19,7 +19,8 @@ from typing import List, Dict, Any, Tuple, Optional
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from utils import extract_text_content, make_preview, truncate_text, MAX_CHARS_PER_MESSAGE
+from utils import (extract_text_content, make_preview, truncate_text,
+                   compute_project_hash, MAX_CHARS_PER_MESSAGE)
 from db import (get_connection, insert_session, get_session, insert_exchanges,
                 update_session_offset, get_exchanges, insert_tag, DB_PATH,
                 get_connections, get_highlights, update_connection_check,
@@ -381,9 +382,13 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
     """
     session_id = input_data.get('session_id', 'unknown')
     transcript_path = input_data.get('transcript_path', '')
-    user_prompt = input_data.get('user_prompt', '')
-    project_path = input_data.get('project_path', '')
-    project_hash = input_data.get('project_hash', '')
+    # Current Claude Code sends 'prompt' and 'cwd'; older payloads used
+    # 'user_prompt'/'project_path'. Accept the new fields, fall back to legacy.
+    user_prompt = input_data.get('prompt') or input_data.get('user_prompt', '')
+    project_path = input_data.get('cwd') or input_data.get('project_path', '')
+    # project_hash is no longer supplied by the runtime — derive it from cwd
+    # (fall back to a payload-provided hash if one is ever present).
+    project_hash = input_data.get('project_hash') or compute_project_hash(project_path)
 
     now = datetime.now(timezone.utc).isoformat()
 
