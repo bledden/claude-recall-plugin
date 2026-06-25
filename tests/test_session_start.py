@@ -30,8 +30,11 @@ class TestSessionStartEnv(unittest.TestCase):
     def test_writes_session_id_and_project_hash(self):
         run_hook({'session_id': 'sess-123', 'cwd': '/tmp/projZ'}, env_file=self.env)
         content = self.env.read_text()
-        self.assertIn('RECALL_SESSION_ID=sess-123', content)
-        self.assertIn(f'RECALL_PROJECT_HASH={compute_project_hash("/tmp/projZ")}', content)
+        # Must use `export KEY=value` (the documented $CLAUDE_ENV_FILE format) so
+        # the vars actually propagate to the python3 subprocesses the /recall
+        # commands spawn — bare `KEY=value` would not export to children.
+        self.assertIn('export RECALL_SESSION_ID=sess-123', content)
+        self.assertIn(f'export RECALL_PROJECT_HASH={compute_project_hash("/tmp/projZ")}', content)
 
     def test_no_session_id_writes_nothing(self):
         run_hook({'cwd': '/tmp/x'}, env_file=self.env)

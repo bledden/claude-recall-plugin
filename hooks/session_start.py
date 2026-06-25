@@ -45,9 +45,11 @@ def run_hook(input_data: Dict, env_file: Optional[Path] = None) -> Dict:
 
     env_path = env_file or os.environ.get('CLAUDE_ENV_FILE')
     if env_path:
+        # Use `export KEY=value` — the documented $CLAUDE_ENV_FILE format — so the
+        # vars are exported to the python3 subprocesses the /recall commands spawn.
         with open(env_path, 'a', encoding='utf-8') as f:
-            f.write(f"RECALL_SESSION_ID={session_id}\n")
-            f.write(f"RECALL_PROJECT_HASH={project_hash}\n")
+            f.write(f"export RECALL_SESSION_ID={session_id}\n")
+            f.write(f"export RECALL_PROJECT_HASH={project_hash}\n")
 
     return {}
 
