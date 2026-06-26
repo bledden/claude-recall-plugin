@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-06-26
+
+### Fixed
+- Hooks now read current Claude Code input fields `prompt`/`cwd` (were `user_prompt`/`project_path`/`project_hash`) and derive the project hash from `cwd` — restores cross-project search, `--all`, connect-latest, and project-scoped commands that had silently broken against current Claude Code (verified against a live hook payload)
+- Compaction nudge registered under `PreCompact` (was the non-existent `PostCompact`, so it never fired)
+- New `SessionStart` hook exports `RECALL_SESSION_ID`/`RECALL_PROJECT_HASH` to `$CLAUDE_ENV_FILE` (using the documented `export KEY=value` format); `/recall` commands now resolve the current session, which previously relied on never-defined `$SESSION_ID`/`$SESSION_HASH`
+- `fetch_exchanges`: `last0`/`last<=0` rejected (was dumping all exchanges); search scope flags are mutually exclusive
+- `show_index`: `--search` uses FTS5; `--around` compares in local time; negative pages guarded
+- `manage_sessions`: `prune --before` validates the date before a destructive delete; export of a missing session errors instead of emitting empty JSON
+- `manage_tags`: `add` distinguishes inserted vs already-present; `--project` documented as a hash
+- `highlight`: argparse migration — `--help` no longer performs a real insert; bad `--exchange` errors cleanly
+- `manage_connections`: single mode vocabulary (explicit/decay, silent/inject); `inbox` is a read-only view (`--mark-read` to advance, decay-only); `disconnect`/`config` report when nothing changed
+- Enhanced-tier consent text is honest — no fabricated model download / SHA256 — and ONNX is no longer falsely auto-detected (v3 branch)
+
+### Changed
+- DB schema versioning via `PRAGMA user_version` for managed future migrations
+- README / command / skill command surfaces reconciled; phantom `export --json` flag removed
+- Stress/concurrency/scale suites wired into CI via `pytest.ini` (full suite: 386 passing)
+
 ## [2.2.0] - 2026-04-02
 
 ### Added
