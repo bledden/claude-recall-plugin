@@ -1,4 +1,4 @@
-# Claude Recall Plugin v2.2.0
+# Claude Recall Plugin v2.2.2
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events — with cross-session search, tagging, cross-session highlight sharing, and observability.
 
@@ -89,7 +89,7 @@ Create `claude-recall-marketplace/.claude-plugin/marketplace.json`:
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "recall-local",
-  "version": "1.0.0",
+  "version": "2.2.2",
   "description": "Local marketplace for the recall plugin",
   "owner": {
     "name": "your-name",
@@ -271,9 +271,9 @@ Search across all sessions in a project with `--all`, or across every project yo
 /recall search "triton kernel" --global
 ```
 
-### 3. PostCompact Nudge
+### 3. Compaction Nudge
 
-After Claude Code compacts the conversation, the plugin automatically injects a brief context-recovery hint: a prompt reminding Claude to re-anchor on what was happening. No manual `/recall` needed after compaction.
+When Claude Code compacts the conversation (via the `PreCompact` hook), the plugin automatically injects a brief context-recovery hint reminding Claude to re-anchor on what was happening. No manual `/recall` needed around compaction.
 
 ### 4. Auto-Tagging
 
@@ -321,7 +321,7 @@ By default, connections are `check_mode=explicit` — highlights only appear whe
 An optional skill that teaches Claude to proactively use the recall plugin. Enable with `/recall config skill_enabled true`.
 
 When enabled, Claude will:
-- **Detect context loss** — recognizes when it's lost earlier conversation context (explicit signals like "didn't we already...", behavioral signals like contradicting itself, temporal signals like post-compaction)
+- **Detect context loss** — explicit phrases ("didn't we already...", "remind me what...") are caught *deterministically by the `UserPromptSubmit` hook*, which injects a `[Recall]` suggestion (so it no longer depends on the model noticing); behavioral signals (contradicting itself) and temporal signals (post-compaction) stay model-driven
 - **Suggest highlighting** — when Claude produces a transferable finding, it suggests `/recall highlight` (or auto-runs it if `auto_run_highlight` is enabled)
 - **Translate natural language** — "keep an eye on session abc123" becomes `/recall connect abc123 "..."`
 - **Suggest inbox checks** — when working on topics that overlap with connected sessions
@@ -330,7 +330,7 @@ The skill is fully opt-in and respects all existing opt-in gates. It never auto-
 
 ### 8. Concurrent Session Safety
 
-Multiple Claude sessions in the same project write to the same database without conflicts. SQLite WAL mode allows concurrent reads and serializes writes safely.
+Multiple Claude sessions in the same project write to the same database without conflicts (SQLite WAL mode allows concurrent reads and serializes writes). Each session also resolves *its own* identity from the native, per-session `CLAUDE_CODE_SESSION_ID` that Claude Code injects into every command — so `/recall` always returns the current session's history, never a concurrent session's, even with several sessions open at once.
 
 ### 9. SQLite Storage
 
@@ -471,8 +471,9 @@ Navigation:
 
 Three hooks are registered:
 
-- **UserPromptSubmit** — Incrementally indexes each exchange into SQLite on every prompt. Handles `/clear` survival by committing before the clear executes. Also runs connection checks (decay mode) and auto-highlight detection (if enabled).
-- **PostCompact** — After compaction, injects a context-recovery nudge so Claude re-anchors on the session state.
+- **SessionStart** — Exports the session's env vars (a legacy fallback for resolving the current session/project; the native `CLAUDE_CODE_SESSION_ID` is preferred).
+- **UserPromptSubmit** — Incrementally indexes each exchange into SQLite on every prompt. Handles `/clear` survival by committing before the clear executes. Also runs connection checks (decay mode), auto-highlight detection, and the deterministic proactive-recall suggestion (all if enabled).
+- **PreCompact** — On compaction, injects a context-recovery nudge so Claude re-anchors on the session state.
 - **SessionEnd** — Finalizes the session record in the database.
 
 ### Storage
@@ -530,16 +531,17 @@ wc -l ~/.claude/recall-events.log
 ```
 claude-recall-plugin/
 ├── .claude-plugin/
-│   └── plugin.json                  # Plugin metadata (v2.2.0)
+│   └── plugin.json                  # Plugin metadata (v2.2.2)
 ├── commands/
 │   └── recall.md                    # The /recall command definition
 ├── skills/
 │   └── recall-assistant/
 │       └── SKILL.md                 # Proactive recall assistant skill
 ├── hooks/
-│   ├── hooks.json                   # Hook config (UserPromptSubmit, PostCompact, SessionEnd)
-│   ├── prompt_submit.py             # Incremental indexer + auto-tagging + connection checks
-│   ├── post_compact.py              # Context recovery nudge
+│   ├── hooks.json                   # Hook config (SessionStart, UserPromptSubmit, PreCompact, SessionEnd)
+│   ├── session_start.py             # Exports session env vars (legacy fallback)
+│   ├── prompt_submit.py             # Incremental indexer + auto-tagging + proactive recall
+│   ├── post_compact.py              # Context recovery nudge (PreCompact)
 │   └── session_end.py               # Session finalization
 ├── scripts/
 │   ├── db.py                        # SQLite layer (FTS5, WAL, all CRUD)
@@ -551,24 +553,10 @@ claude-recall-plugin/
 │   ├── manage_sessions.py           # Session list, prune, export, stats
 │   ├── fetch_exchanges.py           # Fetch exchanges by query
 │   └── show_index.py                # Paginated index display
-├── tests/
-│   ├── test_db.py                   # Schema, CRUD, FTS5, maintenance (43 tests)
-│   ├── test_auto_tagger.py          # TF extraction, heuristic (13 tests)
-│   ├── test_prompt_submit.py        # Hook behavior, migration (13 tests)
-│   ├── test_post_compact.py         # Nudge generation (7 tests)
-│   ├── test_session_end.py          # Session finalization (3 tests)
-│   ├── test_fetch_exchanges.py      # Query scripts (25 tests)
-│   ├── test_show_index.py           # Pagination, search (26 tests)
-│   ├── test_manage_tags.py          # Tag management (14 tests)
-│   ├── test_manage_sessions.py      # Session management (16 tests)
-│   ├── test_manage_connections.py   # Connection management (15 tests)
-│   ├── test_highlight.py            # Highlight creation (19 tests)
-│   ├── integration_test.py          # Full lifecycle, migration, cross-project (4 tests)
-│   ├── eval_skill_defaults.py       # Skill config and SKILL.md verification (50 tests)
-│   ├── stress_test_scale.py         # Scale: 5000 exchanges, FTS5 timing (22 tests)
-│   ├── stress_test_concurrent.py    # Concurrent: 5 threads, WAL validation (6 tests)
-│   ├── stress_test_clear.py         # /clear cycles: 20 rapid clears (22 tests)
-│   └── stress_test_sharing.py       # Sharing: highlights, decay, inbox (22 tests)
+├── tests/                          # 396 tests: unit + integration + skill evals
+│                                    #   + stress (scale/concurrent/clear/sharing)
+│                                    #   run with `python3 -m pytest -q` (see pytest.ini)
+├── pytest.ini                      # Collects test_*.py AND stress_test_*.py
 ├── docs/
 │   └── superpowers/
 │       ├── specs/                   # Design specifications
@@ -585,14 +573,9 @@ claude-recall-plugin/
 ```bash
 cd claude-recall-plugin
 
-# Unit and integration tests (226 tests)
-python3 -m pytest tests/ -v
-
-# Stress tests (72 tests)
-python3 -m pytest tests/stress_test_*.py -v
-
-# All tests (298 total)
-python3 -m pytest tests/ tests/stress_test_*.py -v
+# Full suite — unit, integration, and stress (396 tests)
+# pytest.ini collects both test_*.py and stress_test_*.py
+python3 -m pytest -q
 ```
 
 ---
