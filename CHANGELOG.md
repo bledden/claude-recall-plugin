@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - 2026-06-28
+
+### Fixed
+- **"`/recall` returns another session's data" under concurrency** (multi-session Linux): session identity now resolves from the native, per-session `CLAUDE_CODE_SESSION_ID` that Claude Code injects into every command subprocess, instead of an appended `$CLAUDE_ENV_FILE` var that could leak between concurrent sessions. A stale/leaked `RECALL_SESSION_ID` can no longer win. Project scope (`--all`, `sessions`, `tags`) self-resolves from the working directory; `connect-latest` self-resolves its project hash. `recall.md` no longer relies on `$SESSION_ID`/`$SESSION_HASH` plumbing.
+
+### Added
+- **Reliable proactive recall:** the `UserPromptSubmit` hook now deterministically detects explicit context-loss phrases ("didn't we discuss…", "remind me what…", etc.) and injects a `[Recall]` suggestion — gated on `skill_enabled` (opt-in, default off). Previously this depended on the model noticing, so it fired only sometimes; the recall-assistant skill retains the behavioral/temporal signals.
+
 ## [2.2.1] - 2026-06-26
 
 ### Fixed
