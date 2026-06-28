@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 
 from db import get_connection, insert_tag, get_tags
-from utils import compute_project_hash
+from utils import compute_project_hash, resolve_project_hash
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +274,8 @@ def main() -> None:
                 )
 
         elif args.command == 'list':
-            project_hash = resolve_project_filter(args.project)
+            # `tags --project X` filters by X; bare `tags` = the CURRENT project.
+            project_hash = resolve_project_filter(args.project) if args.project else resolve_project_hash()
             tags = list_tags(conn, project_hash=project_hash)
             print(format_tag_list(tags))
 

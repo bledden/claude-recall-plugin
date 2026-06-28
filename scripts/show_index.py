@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from db import get_connection, get_session, get_exchanges, search_exchanges_fts, get_exchange_count
 from utils import (
+    resolve_session_id,
     format_timestamp,
     format_date,
     format_short_date,
@@ -250,7 +251,7 @@ def main():
     args = parser.parse_args()
 
     # Resolve session ID
-    session_id = args.session or os.environ.get('RECALL_SESSION_ID', '')
+    session_id = resolve_session_id(args.session)
 
     if not session_id:
         print("*No session ID provided. Use --session <id> or set RECALL_SESSION_ID.*")

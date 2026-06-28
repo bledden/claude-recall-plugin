@@ -12,7 +12,7 @@ SKILL.md) — there is exactly ONE set of accepted values:
 CLI usage:
     manage_connections.py connect <watcher> <target> "topic"
         [--check-mode {explicit,decay}] [--delivery-mode {silent,inject}]
-    manage_connections.py connect-latest <watcher> <project_hash> "topic"
+    manage_connections.py connect-latest <watcher> "topic"   (project self-resolves from cwd)
         [--check-mode {explicit,decay}] [--delivery-mode {silent,inject}]
     manage_connections.py disconnect <watcher> <target>
     manage_connections.py inbox <watcher> [--mark-read]
@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from db import (get_connection, get_session, list_sessions, insert_connection,
                 get_connections, delete_connection, update_connection_check,
                 get_highlights_for_connections, get_session_config, set_session_config)
-from utils import format_timestamp
+from utils import format_timestamp, resolve_project_hash
 
 # ---------------------------------------------------------------------------
 # Connect / Disconnect
@@ -355,7 +355,6 @@ def build_parser() -> argparse.ArgumentParser:
         'connect-latest',
         help='Connect to the most recent active session in a project.')
     p_latest.add_argument('watcher')
-    p_latest.add_argument('project_hash')
     p_latest.add_argument('topic')
     p_latest.add_argument('--check-mode', dest='check_mode',
                           choices=CHECK_MODES, default='explicit')
@@ -392,7 +391,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                           delivery_mode=args.delivery_mode))
 
         elif args.command == 'connect-latest':
-            print(connect_latest(conn, args.watcher, args.project_hash, args.topic,
+            # Project hash self-resolves from cwd (no longer a CLI positional).
+            print(connect_latest(conn, args.watcher, resolve_project_hash(), args.topic,
                                  check_mode=args.check_mode,
                                  delivery_mode=args.delivery_mode))
 

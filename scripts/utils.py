@@ -38,6 +38,36 @@ def compute_project_hash(project_path: str) -> str:
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]
 
 
+def resolve_session_id(explicit: str = '') -> str:
+    """Resolve the current session id — concurrency-safe.
+
+    Precedence:
+      1. an explicit value (e.g. a ``--session`` CLI arg),
+      2. ``CLAUDE_CODE_SESSION_ID`` — injected by Claude Code into every command
+         subprocess, so it is correct PER session even when several sessions run
+         concurrently (the fix for "recall returns another session's id"),
+      3. ``RECALL_SESSION_ID`` — legacy fallback written by the SessionStart hook,
+         for Claude Code versions that don't provide the native variable.
+
+    Returns ``''`` if none is available (callers should fail safe — never guess
+    another session).
+    """
+    return (explicit
+            or os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+            or os.environ.get('RECALL_SESSION_ID', ''))
+
+
+def resolve_project_hash(explicit: str = '') -> str:
+    """Resolve the current project hash.
+
+    Precedence: explicit value > ``RECALL_PROJECT_HASH`` env > derived from the
+    current working directory (commands run with the project root as cwd).
+    """
+    return (explicit
+            or os.environ.get('RECALL_PROJECT_HASH', '')
+            or compute_project_hash(os.getcwd()))
+
+
 def extract_text_content(message: Dict[str, Any]) -> str:
     """Extract text content from a message object.
 

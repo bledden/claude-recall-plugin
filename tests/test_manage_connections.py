@@ -413,11 +413,13 @@ class TestArgparseDispatch(unittest.TestCase):
         self.assertEqual(ns.delivery_mode, 'inject')
 
     def test_connect_latest_parses_mode_flags(self):
-        """connect-latest subcommand accepts --check-mode / --delivery-mode."""
+        """connect-latest takes (watcher, topic) — project hash self-resolves
+        from cwd, so it is no longer a positional — plus --check/--delivery-mode."""
         parser = manage_connections.build_parser()
         ns = parser.parse_args(
-            ['connect-latest', 'w', 'hash', 'topic',
-             '--check-mode', 'decay'])
+            ['connect-latest', 'w', 'topic', '--check-mode', 'decay'])
+        self.assertEqual(ns.watcher, 'w')
+        self.assertEqual(ns.topic, 'topic')
         self.assertEqual(ns.check_mode, 'decay')
 
 

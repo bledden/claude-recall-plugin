@@ -34,6 +34,8 @@ from db import (
 )
 from manage_tags import search_by_tag
 from utils import (
+    resolve_session_id,
+    resolve_project_hash,
     truncate_text,
     format_timestamp,
     format_short_date,
@@ -255,7 +257,7 @@ def main():
         return
 
     # Resolve session ID: CLI arg beats env var
-    session_id = args.session or os.environ.get('RECALL_SESSION_ID', '')
+    session_id = resolve_session_id(args.session)
 
     # Open DB connection
     conn = get_connection()
@@ -323,15 +325,19 @@ def main():
                 print(format_cross_project_results(all_results, keyword))
                 return
 
-            # --all: search all sessions in current project (needs --project-hash)
+            # --all: search all sessions in the current project
             if args.scope_all:
                 project_hash = args.project_hash
                 if not project_hash and session_id:
                     sess = get_session(conn, session_id)
                     if sess:
                         project_hash = sess.get('project_hash')
+                # Fall back to the current project (derived from cwd) so --all
+                # works without an explicit hash or a valid session.
                 if not project_hash:
-                    print("*--all requires a project hash (pass --project-hash or ensure --session is valid).*")
+                    project_hash = resolve_project_hash()
+                if not project_hash:
+                    print("*--all: could not resolve a project hash.*")
                     return
                 results = search_exchanges_fts(conn, keyword, project_hash=project_hash, limit=20)
                 if not results:

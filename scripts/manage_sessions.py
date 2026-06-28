@@ -31,7 +31,7 @@ from db import (
     get_session,
 )
 from manage_tags import get_tags_by_session
-from utils import format_date, format_short_date
+from utils import format_date, format_short_date, resolve_project_hash
 
 _10_MB = 10 * 1024 * 1024
 
@@ -237,6 +237,10 @@ def main() -> None:
             else:
                 project_hash = getattr(args, 'project_hash', None)
                 project_path_contains = getattr(args, 'project', None)
+                # Bare `sessions` (no --all, no explicit scope) means the CURRENT
+                # project — resolve it from cwd instead of listing everything.
+                if not project_hash and not project_path_contains:
+                    project_hash = resolve_project_hash()
             sessions = list_sessions(
                 conn,
                 project_hash=project_hash,
