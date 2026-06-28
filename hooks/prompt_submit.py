@@ -11,6 +11,7 @@ Task 9 cleanup).
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,9 +25,42 @@ from utils import (extract_text_content, make_preview, truncate_text,
 from db import (get_connection, insert_session, get_session, insert_exchanges,
                 update_session_offset, get_exchanges, insert_tag, DB_PATH,
                 get_connections, get_highlights, update_connection_check,
-                get_exchange_count)
+                get_exchange_count, get_session_config)
 from auto_tagger import compute_auto_tags
 from highlight import auto_detect_highlights
+
+
+# ---------------------------------------------------------------------------
+# Proactive recall suggestion — the deterministic counterpart to the skill's
+# "explicit context-loss" detection. Running it from the hook means it fires
+# every time the pattern appears, instead of depending on the model noticing.
+# Gated on the per-session skill_enabled config (opt-in, default off).
+# ---------------------------------------------------------------------------
+
+_CONTEXT_LOSS_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
+    r"did\s*n['’]?t we (?:already )?(?:discuss|talk about|cover|go over)",
+    r"what was that (?:thing )?(?:about|called)",
+    r"earlier you (?:said|mentioned)",
+    r"we (?:discussed|talked about|covered) (?:this|that|it)(?: before| earlier| already)?",
+    r"remind me (?:what|how|about|again)",
+    r"you mentioned (?:something )?(?:about )?",
+    r"as we (?:discussed|talked about)",
+    r"weren['’]?t we (?:working on|talking about)",
+)]
+
+
+def _maybe_suggest_recall(conn, session_id, user_prompt):
+    """Return a recall suggestion when the prompt shows an explicit context-loss
+    signal AND the recall-assistant skill is enabled for this session, else None.
+    """
+    if not user_prompt:
+        return None
+    if not get_session_config(conn, session_id, 'skill_enabled'):
+        return None
+    if any(p.search(user_prompt) for p in _CONTEXT_LOSS_PATTERNS):
+        return ("[Recall] That sounds like earlier context — you can run "
+                "`/recall search <topic>` or `/recall last10` to recover it.")
+    return None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -455,7 +489,13 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
             return {
                 "systemMessage": f"[Observability] Context recall logged at exchange #{exchange_count}"
             }
-        elif connection_msg:
+
+        # Proactive recall suggestion (deterministic; gated on skill_enabled)
+        suggestion = _maybe_suggest_recall(conn, session_id, user_prompt)
+        if suggestion:
+            return {"systemMessage": suggestion}
+
+        if connection_msg:
             return {"systemMessage": connection_msg}
 
         return {}

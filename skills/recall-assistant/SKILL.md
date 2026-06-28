@@ -17,6 +17,12 @@ When `skill_enabled` is true, watch for signals that you have lost earlier conve
 
 ### Explicit Signals
 
+> **Hook-backed (reliable):** when `skill_enabled` is true, the `UserPromptSubmit`
+> hook already detects these explicit phrases *deterministically* and injects a
+> `[Recall]` suggestion — so this signal no longer depends on you noticing. When
+> you see that injected suggestion, act on it (run the appropriate recall). The
+> behavioral and temporal signals below remain model-driven.
+
 Watch for the user saying things like:
 - "didn't we already discuss..."
 - "what was that thing about..."
