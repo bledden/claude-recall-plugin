@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **"`/recall` returns another session's data" under concurrency** (multi-session Linux): session identity now resolves from the native, per-session `CLAUDE_CODE_SESSION_ID` that Claude Code injects into every command subprocess, instead of an appended `$CLAUDE_ENV_FILE` var that could leak between concurrent sessions. A stale/leaked `RECALL_SESSION_ID` can no longer win. Project scope (`--all`, `sessions`, `tags`) self-resolves from the working directory; `connect-latest` self-resolves its project hash. `recall.md` no longer relies on `$SESSION_ID`/`$SESSION_HASH` plumbing.
+- **Hooks silently failed on Linux without `python3` on PATH**: every hook hard-coded `python3`. Each hook command now probes for `python3` and falls back to `python`, so indexing/recall work on environments that only ship `python`.
 
 ### Added
 - **Reliable proactive recall:** the `UserPromptSubmit` hook now deterministically detects explicit context-loss phrases ("didn't we discuss…", "remind me what…", etc.) and injects a `[Recall]` suggestion — gated on `skill_enabled` (opt-in, default off). Previously this depended on the model noticing, so it fired only sometimes; the recall-assistant skill retains the behavioral/temporal signals.

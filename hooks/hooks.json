@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
+            "command": "command -v python3 >/dev/null 2>&1 && PY=python3 || PY=python; $PY ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
             "timeout": 10
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/prompt_submit.py",
+            "command": "command -v python3 >/dev/null 2>&1 && PY=python3 || PY=python; $PY ${CLAUDE_PLUGIN_ROOT}/hooks/prompt_submit.py",
             "timeout": 10
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/post_compact.py",
+            "command": "command -v python3 >/dev/null 2>&1 && PY=python3 || PY=python; $PY ${CLAUDE_PLUGIN_ROOT}/hooks/post_compact.py",
             "timeout": 5
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_end.py",
+            "command": "command -v python3 >/dev/null 2>&1 && PY=python3 || PY=python; $PY ${CLAUDE_PLUGIN_ROOT}/hooks/session_end.py",
             "timeout": 5
           }
         ]

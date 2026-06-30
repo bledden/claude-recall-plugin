@@ -28,6 +28,20 @@ class TestHooksConfig(unittest.TestCase):
         self.assertIn('UserPromptSubmit', self.hooks)
         self.assertIn('SessionEnd', self.hooks)
 
+    def test_hook_commands_have_python_fallback(self):
+        """Hooks must not hard-code bare `python3` — on Linux boxes where
+        python3 isn't on PATH (or it's `python`), every hook silently fails.
+        Each command must probe for python3 and fall back to python.
+        """
+        for event, entries in self.hooks.items():
+            for entry in entries:
+                for h in entry.get('hooks', []):
+                    cmd = h['command']
+                    self.assertIn('command -v python3', cmd,
+                                  f"{event} hook has no python3 probe: {cmd}")
+                    self.assertIn('PY=python', cmd,
+                                  f"{event} hook has no python fallback: {cmd}")
+
 
 if __name__ == '__main__':
     unittest.main()
