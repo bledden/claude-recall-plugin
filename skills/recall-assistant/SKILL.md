@@ -163,6 +163,7 @@ When suggesting recall commands, use these:
 - `/recall sessions --project <name>` — list sessions in specific project (unanchored substring path match)
 - `/recall session <id> last10` — browse a past session
 - `/recall stats` — storage statistics
+- `/recall usage` — how often `/recall` has been invoked (by command, month, project)
 
 ### Tagging
 - `/recall tag <name>` — tag current session

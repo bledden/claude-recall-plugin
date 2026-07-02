@@ -85,5 +85,33 @@ class TestInvocations(unittest.TestCase):
         self.assertEqual(r['args'], 'x')
 
 
+class TestUsageReport(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = Path(self.tmp) / 'usage.db'
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_empty(self):
+        from manage_sessions import usage_report
+        conn = get_connection(self.db_path)
+        out = usage_report(conn)
+        conn.close()
+        self.assertIn('No recall invocations', out)
+
+    def test_summarizes_by_command_and_totals(self):
+        from manage_sessions import usage_report
+        conn = get_connection(self.db_path)
+        log_invocation(conn, 'search', 'runpod', 's1', 'phA')
+        log_invocation(conn, 'search', 'ssh', 's1', 'phA')
+        log_invocation(conn, 'last5', '', 's2', 'phB')
+        out = usage_report(conn)
+        conn.close()
+        self.assertIn('3 invocation', out)   # total
+        self.assertIn('search: 2', out)
+        self.assertIn('last5: 1', out)
+
+
 if __name__ == '__main__':
     unittest.main()

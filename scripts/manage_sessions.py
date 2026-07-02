@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime
 from typing import Dict, List
 
@@ -189,6 +190,34 @@ def export_session(conn, session_id: str) -> Dict:
 # CLI
 # ---------------------------------------------------------------------------
 
+def usage_report(conn) -> str:
+    """Summarize recorded `/recall` invocations (the invocations table)."""
+    rows = conn.execute(
+        "SELECT ts, session_id, project_hash, command FROM invocations"
+    ).fetchall()
+    if not rows:
+        return "*No recall invocations recorded yet.*"
+
+    total = len(rows)
+    by_cmd = Counter(r['command'] for r in rows)
+    by_month = Counter((r['ts'] or '')[:7] for r in rows if r['ts'])
+    sessions = {r['session_id'] for r in rows if r['session_id']}
+    projects = {r['project_hash'] for r in rows if r['project_hash']}
+    tss = sorted(r['ts'] for r in rows if r['ts'])
+
+    lines = [f"**Recall usage:** {total} invocations · "
+             f"{len(sessions)} sessions · {len(projects)} projects"]
+    if tss:
+        lines.append(f"Range: {tss[0][:10]} → {tss[-1][:10]}")
+    lines.append("\nBy command:")
+    for c, n in by_cmd.most_common():
+        lines.append(f"  {c}: {n}")
+    lines.append("\nBy month:")
+    for m in sorted(by_month):
+        lines.append(f"  {m}: {by_month[m]}")
+    return "\n".join(lines)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='manage_sessions.py',
@@ -220,6 +249,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # stats
     sub.add_parser('stats', help='Show database statistics.')
+    sub.add_parser('usage', help='Show /recall invocation usage stats.')
 
     return parser
 
@@ -285,6 +315,9 @@ def main() -> None:
         elif args.command == 'stats':
             stats = get_stats(conn)
             print(format_stats(stats))
+
+        elif args.command == 'usage':
+            print(usage_report(conn))
     finally:
         conn.close()
 

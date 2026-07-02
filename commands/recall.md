@@ -33,6 +33,7 @@ The user wants to recover context from this conversation.
 - `tag <name> #<exchange>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py add <name> $CLAUDE_CODE_SESSION_ID <exchange>`
 - `tags` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_tags.py list`
 - `stats` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py stats`
+- `usage` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py usage`
 - `prune --session <id>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py prune --session <id>`
 - `prune --before <date>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py prune --before <date>`
 - `export --session <id>` → `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manage_sessions.py export --session <id>` (always emits JSON)

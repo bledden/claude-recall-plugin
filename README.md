@@ -237,6 +237,7 @@ This will:
 
 ```
 /recall stats                               Storage statistics
+/recall usage                               How often /recall has been invoked (by command, month, project)
 /recall prune --session <id>                Delete a specific session
 /recall prune --before 2026-01-01           Delete all sessions before a date
 /recall export --session <id>               Export a session to JSON (always JSON)
