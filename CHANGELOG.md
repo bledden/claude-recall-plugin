@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3] - 2026-07-02
+
+### Added
+- **`/recall usage`** — self-served invocation stats (total, date range, by command, by month, by project) from a new durable invocation counter. Every `/recall` command now records itself at the point of use via a schema-v3 `invocations` table, so usage is captured accurately regardless of dispatch path (skill / slash-command / conversational) — no more reconstructing counts from giant transcripts.
+- Troubleshooting section in the README (Linux `Unknown skill` = install/enablement; `python3`-on-PATH; indexer catch-up).
+
+### Fixed
+- **Capture hook wedged — and silently lost lines — on huge transcripts.** A read of up to 10 MB committed once at the very end, so a hook killed by the 10s timeout committed nothing and re-read the same chunk on every prompt (permanently stuck ~10–15 MB behind on marathon sessions); the loop also broke *after* consuming the over-cap line and advanced the offset via a buffered `f.tell()`, skipping the unread tail. Now uses 2 MB / 1000-message caps that fit the timeout and bank progress each prompt, breaks *before* consuming an over-cap line, and advances the offset precisely — converges with zero loss.
+- **The test suite polluted the real event log.** `log_recall_event` hard-coded `~/.claude/recall-events.log`, so running the tests wrote fake session rows into it. Added a `RECALL_LOG_FILE` override + an autouse test fixture (and a `RECALL_DB` override) so the suite never touches real recall data.
+
+### Changed
+- DB schema version bumped to 3 (adds the `invocations` table via a managed migration).
+
 ## [2.2.2] - 2026-06-28
 
 ### Fixed

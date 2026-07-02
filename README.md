@@ -625,6 +625,16 @@ To report a security vulnerability, please open an issue at [github.com/bledden/
 
 ---
 
+## Troubleshooting
+
+**`Unknown skill: recall:recall` (often on Linux)** — this means the plugin's command didn't load, not that anything in the plugin is broken. It's the [2.1.x local-plugin breaking change](https://github.com/anthropics/claude-code/issues/17089): non-marketplace installs (a `--plugin-dir` flag or shell alias) no longer persist. Fix: install from a **marketplace** (see [Installation](#installation)), then `/reload-plugins` (or restart). The recall *scripts* still work regardless of the wrapper, which is why the plugin can also be driven conversationally ("use `/recall` to catch up") even when the `/recall:recall` command is missing.
+
+**Hooks don't seem to fire on Linux** — if your environment ships `python` but not `python3` on `PATH`, upgrade to **v2.2.2+** (hooks now probe for `python3` and fall back to `python`).
+
+**`/recall` shows an old or partial session** — on very large, actively-growing transcripts the indexer catches up incrementally over several prompts. **v2.2.3+** fixed a wedge/skip bug here; run a few prompts and it will converge. `/recall usage` (v2.2.3+) reports your invocation history.
+
+---
+
 ## Uninstalling
 
 **If installed via marketplace:**

@@ -1,6 +1,6 @@
 {
   "name": "recall",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Cross-session, cross-project conversation recall with SQLite storage, auto-tagging, compaction recovery, highlight sharing, and proactive recall assistant skill",
   "author": {
     "name": "bledden",
