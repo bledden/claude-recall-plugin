@@ -228,6 +228,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     """CLI: highlight.py <session_id> <summary> [--exchange IDX]"""
     args = parse_args(argv)
 
+    from db import record_invocation
+    record_invocation('highlight')
+
     conn = get_connection()
     try:
         result = create_highlight(conn, args.session_id, args.summary,

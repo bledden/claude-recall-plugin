@@ -250,6 +250,9 @@ def main():
 
     args = parser.parse_args()
 
+    from db import record_invocation
+    record_invocation('index', getattr(args, 'search', None) or getattr(args, 'around', None) or '')
+
     # Resolve session ID
     session_id = resolve_session_id(args.session)
 

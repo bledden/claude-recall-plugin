@@ -26,7 +26,7 @@ DB_BUSY_TIMEOUT_MS = 5000
 # Current on-disk schema version, tracked via SQLite's PRAGMA user_version.
 # Bump this and add a branch in _apply_migrations() whenever the schema changes
 # (e.g. the v3 vector/tier tables would be version 3).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Schema SQL
@@ -108,6 +108,16 @@ CREATE INDEX IF NOT EXISTS idx_highlights_session ON highlights(session_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_created ON highlights(created_at);
 CREATE INDEX IF NOT EXISTS idx_connections_watcher ON connections(watcher_session);
 CREATE INDEX IF NOT EXISTS idx_connections_target ON connections(target_session);
+
+CREATE TABLE IF NOT EXISTS invocations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    session_id   TEXT,
+    project_hash TEXT,
+    command      TEXT NOT NULL,
+    args         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_invocations_ts ON invocations(ts);
 """
 
 # ---------------------------------------------------------------------------
@@ -126,7 +136,7 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         sqlite3.Connection configured with WAL mode and busy timeout.
     """
     if db_path is None:
-        db_path = str(DB_PATH)
+        db_path = os.environ.get('RECALL_DB') or str(DB_PATH)
     else:
         db_path = str(db_path)
 
@@ -167,11 +177,55 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current >= SCHEMA_VERSION:
         return
-    # (future) per-version migrations would run here, e.g.:
-    #   if current < 3:
-    #       conn.executescript(_MIGRATION_V3_VECTORS)
+    if current < 3:
+        # v3: invocation counter that powers `/recall usage`.
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS invocations ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  ts TEXT NOT NULL, session_id TEXT, project_hash TEXT,"
+            "  command TEXT NOT NULL, args TEXT);"
+            "CREATE INDEX IF NOT EXISTS idx_invocations_ts ON invocations(ts);"
+        )
     conn.execute("PRAGMA user_version = {}".format(SCHEMA_VERSION))
     conn.commit()
+
+
+def log_invocation(conn: sqlite3.Connection, command: str, args: str = '',
+                   session_id: str = '', project_hash: str = '',
+                   commit: bool = True) -> None:
+    """Record one recall command invocation (powers ``/recall usage``).
+
+    Written directly at the point of use, so it captures every invocation
+    regardless of dispatch path (skill, slash-command, or conversational) —
+    unlike the transcript, which has to be reconstructed after the fact.
+    """
+    conn.execute(
+        "INSERT INTO invocations (ts, session_id, project_hash, command, args) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), session_id or '',
+         project_hash or '', command, (args or '')[:500]),
+    )
+    if commit:
+        conn.commit()
+
+
+def record_invocation(command: str, args: str = '') -> None:
+    """Best-effort entry point for scripts: open a short-lived connection and
+    log this invocation with the resolved session/project. Never raises — usage
+    tracking must never break the command it is tracking.
+    """
+    if not command:
+        return
+    try:
+        from utils import resolve_session_id, resolve_project_hash
+        conn = get_connection()
+        try:
+            log_invocation(conn, command, args,
+                           resolve_session_id(), resolve_project_hash())
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Session CRUD

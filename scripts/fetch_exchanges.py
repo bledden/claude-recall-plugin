@@ -265,6 +265,10 @@ def main():
         command = (args.command or 'last5').lower()
         rest = args.rest or []
 
+        from db import record_invocation
+        record_invocation('search-tag' if args.tag else command,
+                          args.tag or ' '.join(rest))
+
         # ------------------------------------------------------------------
         # Handle tag search — independent of session scope
         # ------------------------------------------------------------------

@@ -228,6 +228,9 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    from db import record_invocation
+    record_invocation('sessions' if args.command == 'list' else (args.command or '(menu)'))
+
     conn = get_connection()
     try:
         if args.command == 'list':

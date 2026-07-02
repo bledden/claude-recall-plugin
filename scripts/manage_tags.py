@@ -260,6 +260,9 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    from db import record_invocation
+    record_invocation('tag:' + args.command if args.command else 'tag')
+
     conn = get_connection()
     try:
         if args.command == 'add':

@@ -383,6 +383,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    from db import record_invocation
+    record_invocation(args.command or '(menu)')
+
     conn = get_connection()
     try:
         if args.command == 'connect':
