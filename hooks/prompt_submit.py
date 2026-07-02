@@ -67,6 +67,14 @@ def _maybe_suggest_recall(conn, session_id, user_prompt):
 # ---------------------------------------------------------------------------
 
 LOG_FILE = Path.home() / '.claude' / 'recall-events.log'
+
+# Per-invocation catch-up caps. Kept small so one hook run fits well within the
+# 10s timeout: a killed hook commits nothing, so an oversized read on a huge,
+# actively-growing transcript would wedge the byte offset forever (it re-reads
+# the same chunk and dies every prompt). Small reads bank progress each prompt
+# and converge.
+MAX_BYTES_PER_READ = 2 * 1024 * 1024      # 2 MB
+MAX_MESSAGES_PER_READ = 1000
 LEGACY_INDEX_FILE = Path.home() / '.claude' / 'context-recall' / 'index.json'
 
 # Module-level flag: skip the filesystem stat on every prompt after first check
@@ -94,9 +102,6 @@ def parse_transcript_from_offset(
         Tuple of (messages, new_byte_offset) where each message is a dict
         with keys: role, text, timestamp.
     """
-    MAX_BYTES_PER_READ = 10 * 1024 * 1024  # 10 MB cap per invocation
-    MAX_MESSAGES_PER_READ = 5000
-
     messages: List[Dict] = []
     new_offset = byte_offset
 
@@ -108,11 +113,18 @@ def parse_transcript_from_offset(
             if byte_offset > 0:
                 f.seek(byte_offset)
 
-            bytes_read = 0
+            consumed = 0
             for line_bytes in f:
-                bytes_read += len(line_bytes)
-                if bytes_read > MAX_BYTES_PER_READ or len(messages) >= MAX_MESSAGES_PER_READ:
+                # Stop BEFORE consuming a line that would exceed the caps, so it
+                # is re-read next time rather than skipped (the old code broke
+                # AFTER consuming, then used a buffered f.tell() that lost the
+                # unread tail). Advance the durable offset only past lines we
+                # actually consumed, so a timeout still banks progress.
+                if (consumed + len(line_bytes) > MAX_BYTES_PER_READ
+                        or len(messages) >= MAX_MESSAGES_PER_READ):
                     break
+                consumed += len(line_bytes)
+                new_offset = byte_offset + consumed
                 try:
                     line = line_bytes.decode('utf-8').strip()
                 except UnicodeDecodeError:
@@ -141,8 +153,6 @@ def parse_transcript_from_offset(
                             })
                 except json.JSONDecodeError:
                     continue
-
-            new_offset = f.tell()
 
     except Exception as e:
         print(f"[context-recall] Transcript parse error: {e}", file=sys.stderr)
