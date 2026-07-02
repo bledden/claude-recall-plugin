@@ -279,10 +279,12 @@ def log_recall_event(session_id: str, exchange_count: int) -> None:
 
     print(f"[context-recall] Context recall triggered at exchange #{exchange_count}", file=sys.stderr)
 
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # RECALL_LOG_FILE override keeps tests/tooling out of the real event log.
+    log_file = Path(os.environ.get('RECALL_LOG_FILE') or LOG_FILE)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        with open(log_file, 'a', encoding='utf-8') as f:
             f.write(log_entry)
     except Exception as e:
         print(f"[context-recall] Failed to write log: {e}", file=sys.stderr)

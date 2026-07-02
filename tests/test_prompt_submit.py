@@ -205,11 +205,12 @@ class TestRunHook(unittest.TestCase):
         ]
         _write_transcript(self.transcript_path, entries)
 
-        # Use a custom log file in temp dir to avoid polluting real HOME
+        # Redirect the event log via the RECALL_LOG_FILE override (the
+        # supported mechanism; also what keeps the suite out of the real log).
         log_file = Path(self.temp_dir) / 'recall-events.log'
-        import prompt_submit
-        original_log = prompt_submit.LOG_FILE
-        prompt_submit.LOG_FILE = log_file
+        import os
+        prev = os.environ.get('RECALL_LOG_FILE')
+        os.environ['RECALL_LOG_FILE'] = str(log_file)
 
         try:
             result = run_hook(self._base_input(user_prompt='/recall'), db_path=self.db_path)
@@ -223,7 +224,10 @@ class TestRunHook(unittest.TestCase):
             self.assertIn('CONTEXT_RECALL_TRIGGERED', content)
             self.assertIn('sess-001', content)
         finally:
-            prompt_submit.LOG_FILE = original_log
+            if prev is None:
+                os.environ.pop('RECALL_LOG_FILE', None)
+            else:
+                os.environ['RECALL_LOG_FILE'] = prev
 
 
     def test_connection_check_injects_on_decay(self):
