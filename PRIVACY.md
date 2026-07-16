@@ -1,6 +1,6 @@
 # Privacy Policy — Claude Recall Plugin
 
-**Last updated:** April 2, 2026
+**Last updated:** July 15, 2026
 
 ## What Data Is Stored
 
@@ -15,6 +15,7 @@ The recall plugin stores conversation data locally on your machine to enable con
 | Highlights | Same DB | Summaries of findings flagged for cross-session sharing |
 | Connections | Same DB | Opt-in links between sessions for highlight sharing |
 | Session config | Same DB (sessions.metadata) | User preferences (skill_enabled, check_mode, etc.) |
+| Usage counter (v2.2.3+) | Same DB (invocations) | Timestamp, session ID, project hash, command name, and command arguments for each recall invocation — arguments may include search terms you typed. Powers `/recall usage`; never leaves your machine |
 | Recall events | `~/.claude/recall-events.log` | Timestamps and session IDs when `/recall` is invoked (for observability) |
 
 ## Where Data Is Stored
@@ -43,6 +44,8 @@ Data persists in the SQLite database until you explicitly delete it. The plugin 
 - `/recall prune --before <date>` — delete all sessions before a date
 - `rm -rf ~/.claude/context-recall/` — delete all recall data permanently
 - `rm ~/.claude/recall-events.log` — delete the event log
+
+Versions prior to 2.0 stored snapshots as JSON files (`*_index.json`, `current.json`, `recall-config.json`) in the same `~/.claude/context-recall/` directory. Current versions no longer write these, but old files may remain; the `rm -rf` above removes them along with everything else.
 
 ## User Control
 
