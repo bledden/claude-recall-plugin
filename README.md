@@ -1,10 +1,10 @@
-# Claude Recall Plugin v2.2.2
+# Claude Recall Plugin v2.2.3
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events — with cross-session search, tagging, cross-session highlight sharing, and observability.
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events. It adds cross-session search, tagging, highlight sharing between sessions, and observability.
 
-> **Marketplace Status:** Submitted via the official submission form at [claude.ai/settings/plugins/submit](https://claude.ai/settings/plugins/submit).
+> **Marketplace Status:** Published in Anthropic's community marketplace (`recall@claude-community`). The catalog currently pins an older version while a refresh is in review ([claude-plugins-community#1121](https://github.com/anthropics/claude-plugins-community/issues/1121)); until it lands, install from the pre-built marketplace below to get the current release.
 >
-> **Pre-built Marketplace:** [claude-recall-marketplace](https://github.com/bledden/claude-recall-marketplace) (for easy installation until approved)
+> **Pre-built Marketplace:** [claude-recall-marketplace](https://github.com/bledden/claude-recall-marketplace) (always serves the latest release)
 
 ---
 
@@ -55,7 +55,7 @@ The plugin will appear in your Cowork plugins list. Invoke with `/recall` during
 
 ### Claude Code: Option 1 - Pre-Built Marketplace (Recommended for VSCode)
 
-This is the only reliable method for the VSCode extension until the plugin is approved in the official marketplace.
+This is the recommended method: it always serves the latest release, and it is the only reliable method for the VSCode extension. (The community-marketplace listing `recall@claude-community` works too, but currently pins an older version until the refresh in review lands.)
 
 ```bash
 claude plugin marketplace add https://github.com/bledden/claude-recall-marketplace
@@ -498,12 +498,13 @@ Highlights are created via two paths: explicit (Claude runs `/recall highlight`)
 ~/.claude/recall-events.log            Recall event log (unchanged from v1)
 ```
 
-The database contains five tables:
+The database contains six tables:
 - `sessions` — one row per session, with project, timestamps, and metadata (including per-session config like `auto_highlight`)
 - `exchanges` — one row per exchange, with full user/assistant text
 - `tags` — session and exchange-level tags
 - `highlights` — findings flagged for sharing, linked to a session and exchange; `source` field distinguishes explicit vs auto-detected
 - `connections` — opt-in links between sessions; stores `check_mode`, `check_interval`, `delivery_mode`, and `last_checked_at`
+- `invocations` (v2.2.3+) — one row per recall command invocation (timestamp, session, project hash, command, args); powers `/recall usage`
 
 FTS5 virtual tables index exchange content for fast keyword search across any scope.
 
@@ -532,7 +533,7 @@ wc -l ~/.claude/recall-events.log
 ```
 claude-recall-plugin/
 ├── .claude-plugin/
-│   └── plugin.json                  # Plugin metadata (v2.2.2)
+│   └── plugin.json                  # Plugin metadata (v2.2.3)
 ├── commands/
 │   └── recall.md                    # The /recall command definition
 ├── skills/
@@ -554,7 +555,7 @@ claude-recall-plugin/
 │   ├── manage_sessions.py           # Session list, prune, export, stats
 │   ├── fetch_exchanges.py           # Fetch exchanges by query
 │   └── show_index.py                # Paginated index display
-├── tests/                          # 396 tests: unit + integration + skill evals
+├── tests/                          # 406 tests: unit + integration + skill evals
 │                                    #   + stress (scale/concurrent/clear/sharing)
 │                                    #   run with `python3 -m pytest -q` (see pytest.ini)
 ├── pytest.ini                      # Collects test_*.py AND stress_test_*.py
@@ -563,6 +564,8 @@ claude-recall-plugin/
 │       ├── specs/                   # Design specifications
 │       └── plans/                   # Implementation plans
 ├── README.md
+├── CHANGELOG.md
+├── PRIVACY.md
 ├── LICENSE
 └── .gitignore
 ```
@@ -574,7 +577,7 @@ claude-recall-plugin/
 ```bash
 cd claude-recall-plugin
 
-# Full suite — unit, integration, and stress (396 tests)
+# Full suite — unit, integration, and stress (406 tests)
 # pytest.ini collects both test_*.py and stress_test_*.py
 python3 -m pytest -q
 ```
@@ -610,7 +613,7 @@ To report a security vulnerability, please open an issue at [github.com/bledden/
 - No dynamic code execution of any kind
 - No external network requests or downloads
 - Error messages do not leak file paths or internal state
-- Transcript reads are bounded (10MB / 5000 messages per invocation)
+- Transcript reads are bounded (2MB / 1000 messages per hook invocation, v2.2.3+; progress banks across prompts so large transcripts converge)
 - Database directory created with restricted permissions (0o700)
 - Hook stdin reads bounded to 1MB
 
