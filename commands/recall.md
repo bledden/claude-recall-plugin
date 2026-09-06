@@ -1,7 +1,7 @@
 ---
 description: Recover context from recent conversation
 argument-hint: "[lastN | around TIME | search KEYWORD [--all|--global|--project NAME|--tag NAME] | sessions [--all|--project NAME] | session ID ARGS | tag NAME | tags | stats | highlight | connect | disconnect | inbox | config | prune | export | ... (see full list below)]"
-allowed-tools: Bash(python3:*), AskUserQuestion
+allowed-tools: Bash(python3:*), Bash(python:*), AskUserQuestion
 ---
 
 # Context Recall

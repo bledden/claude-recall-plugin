@@ -96,8 +96,9 @@ class TestRunHook(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_returns_system_message(self):
-        """run_hook with a real session returns a systemMessage key."""
+    def test_returns_additional_context(self):
+        """run_hook returns the nudge as additionalContext (what Claude reads),
+        under the SessionStart event it is now registered on."""
         conn = get_connection(self.db_path)
         _seed_db(conn)
         insert_tag(conn, 'python', 'sess-1', source='auto')
@@ -106,8 +107,10 @@ class TestRunHook(unittest.TestCase):
 
         result = run_hook({'session_id': 'sess-1'}, db_path=self.db_path)
 
-        self.assertIn('systemMessage', result)
-        msg = result['systemMessage']
+        self.assertNotIn('systemMessage', result)  # user-facing only; never reached Claude
+        out = result['hookSpecificOutput']
+        self.assertEqual(out['hookEventName'], 'SessionStart')
+        msg = out['additionalContext']
         self.assertIn('10 exchanges indexed', msg)
         self.assertIn('/recall', msg)
 

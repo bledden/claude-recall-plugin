@@ -5,8 +5,9 @@ Runs on every UserPromptSubmit event.  Reads JSON from stdin, incrementally
 indexes new exchanges into SQLite, runs auto-tagging, and handles v1->v2
 migration from the legacy JSON index.
 
-Replaces the old save_context_snapshot.py (which is left in place until
-Task 9 cleanup).
+The incremental indexer (``index_transcript``) lives here and is shared with
+the Stop and SessionEnd hooks, so a turn is captured as soon as it completes
+and the final turn of a session is never lost.
 """
 
 import json
@@ -21,7 +22,7 @@ from typing import List, Dict, Any, Tuple, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
 from utils import (extract_text_content, make_preview, truncate_text,
-                   compute_project_hash, MAX_CHARS_PER_MESSAGE)
+                   compute_project_hash, MAX_CHARS_PER_MESSAGE, MAX_ASSISTANT_CHARS)
 from db import (get_connection, insert_session, get_session, insert_exchanges,
                 update_session_offset, get_exchanges, insert_tag, DB_PATH,
                 get_connections, get_highlights, update_connection_check,
@@ -123,6 +124,7 @@ def parse_transcript_from_offset(
                 if (consumed + len(line_bytes) > MAX_BYTES_PER_READ
                         or len(messages) >= MAX_MESSAGES_PER_READ):
                     break
+                line_start = byte_offset + consumed
                 consumed += len(line_bytes)
                 new_offset = byte_offset + consumed
                 try:
@@ -150,6 +152,10 @@ def parse_transcript_from_offset(
                                 'role': role,
                                 'text': text,
                                 'timestamp': timestamp,
+                                # byte span of this line: lets the indexer resume
+                                # exactly at a held-back (incomplete) turn
+                                '_start': line_start,
+                                '_end': new_offset,
                             })
                 except json.JSONDecodeError:
                     continue
@@ -168,9 +174,18 @@ def build_new_exchanges(
     messages: List[Dict],
     start_idx: int = 1,
 ) -> List[Dict]:
-    """Pair consecutive user/assistant messages into exchanges.
+    """Pair each user message with ALL the assistant text that follows it.
+
+    In an agentic turn Claude's reply arrives as several assistant text blocks
+    separated by tool calls ("Let me look…", <tool>, "Found it…", <tool>, the
+    actual answer). Pairing a user message with only the *next* assistant
+    message kept the preamble and dropped the answer — 71% of assistant text on
+    a real transcript. Every assistant message up to the next user message is
+    now merged (blank-line separated) into one ``assistant_text``.
 
     Each exchange dict has: idx, preview, timestamp, user_text, assistant_text.
+    A user message with no assistant reply is skipped; assistant messages that
+    precede any user message are skipped.
 
     Args:
         messages: List of message dicts with role, text, timestamp.
@@ -180,25 +195,31 @@ def build_new_exchanges(
         List of exchange dicts.
     """
     exchanges: List[Dict] = []
-    i = 0
     exchange_idx = start_idx
+    i = 0
+    n = len(messages)
 
-    while i < len(messages):
-        if messages[i]['role'] == 'user':
-            user_msg = messages[i]
-            if i + 1 < len(messages) and messages[i + 1]['role'] == 'assistant':
-                assistant_msg = messages[i + 1]
-                exchanges.append({
-                    'idx': exchange_idx,
-                    'preview': make_preview(user_msg['text']),
-                    'timestamp': user_msg.get('timestamp', ''),
-                    'user_text': truncate_text(user_msg['text'], MAX_CHARS_PER_MESSAGE),
-                    'assistant_text': truncate_text(assistant_msg['text'], MAX_CHARS_PER_MESSAGE),
-                })
-                exchange_idx += 1
-                i += 2
-            else:
-                i += 1
+    while i < n:
+        if messages[i]['role'] != 'user':
+            i += 1
+            continue
+        user_msg = messages[i]
+        j = i + 1
+        parts: List[str] = []
+        while j < n and messages[j]['role'] == 'assistant':
+            if messages[j]['text']:
+                parts.append(messages[j]['text'])
+            j += 1
+        if parts:
+            exchanges.append({
+                'idx': exchange_idx,
+                'preview': make_preview(user_msg['text']),
+                'timestamp': user_msg.get('timestamp', ''),
+                'user_text': truncate_text(user_msg['text'], MAX_CHARS_PER_MESSAGE),
+                'assistant_text': truncate_text('\n\n'.join(parts), MAX_ASSISTANT_CHARS),
+            })
+            exchange_idx += 1
+            i = j
         else:
             i += 1
 
@@ -407,24 +428,144 @@ def _check_connections(conn, session_id: str) -> Optional[str]:
 # Core hook logic
 # ---------------------------------------------------------------------------
 
+# Auto-tags are computed over a rolling window of the session's most recent
+# exchanges (not just the exchanges added by this hook run), so a term that
+# recurs across several prompts still reaches AUTO_TAG_MIN_FREQUENCY.
+AUTO_TAG_WINDOW = 50
+
+
+def _hook_context(message: str, event: str = 'UserPromptSubmit') -> Dict:
+    """Wrap *message* as context Claude will actually read.
+
+    ``systemMessage`` is a warning shown to the USER only. Anything the model
+    must act on has to travel via ``hookSpecificOutput.additionalContext``.
+    """
+    return {"hookSpecificOutput": {"hookEventName": event,
+                                   "additionalContext": message}}
+
+
+def _trim_incomplete_tail(messages: List[Dict], final: bool):
+    """Hold back the last turn unless it is provably complete.
+
+    Returns ``(messages_to_index, resume_offset)``. ``resume_offset`` is the
+    byte position of the held-back user message (so the next run re-reads it),
+    or None when nothing is held back.
+
+    Rules:
+      * a trailing user message with no assistant reply is never consumed
+        (it pairs up on a later run; consuming it would orphan the reply);
+      * a trailing user+assistant group is consumed only when ``final`` is
+        True — i.e. the caller knows the turn is over and the transcript is
+        fully flushed. Otherwise a partial reply would be stored and the rest
+        of the turn's blocks orphaned on the next read.
+    """
+    if not messages:
+        return messages, None
+    last_user = -1
+    for i, m in enumerate(messages):
+        if m['role'] == 'user':
+            last_user = i
+    if last_user == -1:
+        return messages, None
+    has_reply = any(m['role'] == 'assistant' for m in messages[last_user + 1:])
+    if has_reply and final:
+        return messages, None
+    return messages[:last_user], messages[last_user].get('_start')
+
+
+def _turn_is_flushed(messages: List[Dict], last_assistant_message: str) -> bool:
+    """At Stop time the transcript file may lag the in-memory turn. Treat the
+    trailing turn as complete only if the payload's ``last_assistant_message``
+    (the final response text) is present in the assistant text read from disk.
+    """
+    if not last_assistant_message:
+        return False
+    tail = ' '.join(last_assistant_message.split())[-200:]
+    if not tail:
+        return False
+    last_user = -1
+    for i, m in enumerate(messages):
+        if m['role'] == 'user':
+            last_user = i
+    on_disk = ' '.join(' '.join(m['text'] for m in messages[last_user + 1:]
+                                if m['role'] == 'assistant').split())
+    return tail in on_disk
+
+
+def index_transcript(conn, session_id: str, transcript_path: str,
+                     project_path: str = '', project_hash: str = '',
+                     now: Optional[str] = None, final: bool = True,
+                     last_assistant_message: Optional[str] = None) -> List[Dict]:
+    """Incrementally index a session's transcript into the DB (no commit).
+
+    Shared by the UserPromptSubmit, Stop and SessionEnd hooks. Ensures the
+    session row exists, reads the transcript from the saved byte offset, pairs
+    new messages into exchanges, inserts them (+ FTS), advances the offset,
+    refreshes auto-tags over a rolling window, and runs auto-highlight
+    detection on the new exchanges. The caller commits.
+
+    ``final`` says whether the trailing turn may be consumed (see
+    ``_trim_incomplete_tail``). When ``last_assistant_message`` is given (the
+    Stop hook), ``final`` is instead derived by checking that text reached the
+    transcript file. A read that stopped at the size cap is never final.
+
+    Returns the list of newly inserted exchange dicts (may be empty).
+    """
+    now = now or datetime.now(timezone.utc).isoformat()
+    insert_session(conn, session_id=session_id, project_path=project_path,
+                   project_hash=project_hash, started_at=now,
+                   transcript_path=transcript_path, commit=False)
+
+    session = get_session(conn, session_id)
+    byte_offset = session['byte_offset'] if session else 0
+    existing_count = (session['exchange_count'] or 0) if session else 0
+
+    current_size = 0
+    if transcript_path and os.path.exists(transcript_path):
+        current_size = os.path.getsize(transcript_path)
+
+    new_exchanges_list: List[Dict] = []
+    if current_size > byte_offset:
+        new_messages, new_offset = parse_transcript_from_offset(transcript_path, byte_offset)
+        reached_eof = new_offset >= current_size
+        if last_assistant_message is not None:
+            final = _turn_is_flushed(new_messages, last_assistant_message)
+        usable, resume = _trim_incomplete_tail(new_messages, final and reached_eof)
+        if resume is not None:
+            new_offset = resume
+        if usable:
+            new_exchanges_list = build_new_exchanges(usable, existing_count + 1)
+            if new_exchanges_list:
+                insert_exchanges(conn, session_id, new_exchanges_list, commit=False)
+        update_session_offset(conn, session_id, new_offset,
+                              existing_count + len(new_exchanges_list), commit=False)
+
+    if new_exchanges_list:
+        window = get_exchanges(conn, session_id, last_n=AUTO_TAG_WINDOW)
+        _store_auto_tags(conn, session_id, window, commit=False)
+        auto_detect_highlights(conn, session_id, new_exchanges_list, commit=False)
+
+    return new_exchanges_list
+
+
 def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
     """Core hook logic, separated from stdin/stdout for testability.
 
     1. Extract session metadata from *input_data*.
     2. Open (or create) the SQLite DB.
     3. Run one-time v1 migration if a legacy index.json exists.
-    4. Ensure the session row exists.
-    5. Incrementally parse any new transcript data and insert exchanges.
-    6. Run auto-tagger over the full session.
-    7. If the user typed ``/recall``, log the event and return a systemMessage.
+    4. Index any new transcript data (``index_transcript``).
+    5. Poll cross-session connections.
+    6. Commit once.
+    7. Return user-facing ``systemMessage`` for ``/recall`` observability, or
+       ``additionalContext`` for anything Claude must act on.
 
     Args:
         input_data: Dict parsed from the hook's stdin JSON.
         db_path: Override path for the database (used in tests).
 
     Returns:
-        Dict to be printed as JSON to stdout.  Empty dict ``{}`` for
-        normal prompts; ``{"systemMessage": "..."}`` for /recall.
+        Dict to be printed as JSON to stdout.  ``{}`` for normal prompts.
     """
     session_id = input_data.get('session_id', 'unknown')
     transcript_path = input_data.get('transcript_path', '')
@@ -436,56 +577,17 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
     # (fall back to a payload-provided hash if one is ever present).
     project_hash = input_data.get('project_hash') or compute_project_hash(project_path)
 
-    now = datetime.now(timezone.utc).isoformat()
-
     conn = get_connection(db_path)
 
     try:
         # One-time v1 migration (no-op if legacy file absent or already checked)
         migrate_from_json(conn)
 
-        # Ensure session exists (no individual commit — batched below)
-        insert_session(
-            conn,
-            session_id=session_id,
-            project_path=project_path,
-            project_hash=project_hash,
-            started_at=now,
-            transcript_path=transcript_path,
-            commit=False,
-        )
-
-        # Read current offset
-        session = get_session(conn, session_id)
-        byte_offset = session['byte_offset'] if session else 0
-
-        # Check if transcript has grown
-        current_size = 0
-        if transcript_path and os.path.exists(transcript_path):
-            current_size = os.path.getsize(transcript_path)
-
-        new_exchanges_list: List[Dict] = []
-        existing_count = session['exchange_count'] or 0 if session else 0
-
-        if current_size > byte_offset:
-            new_messages, new_offset = parse_transcript_from_offset(transcript_path, byte_offset)
-
-            if new_messages:
-                start_idx = existing_count + 1
-                new_exchanges_list = build_new_exchanges(new_messages, start_idx)
-
-                if new_exchanges_list:
-                    insert_exchanges(conn, session_id, new_exchanges_list, commit=False)
-
-                total_count = existing_count + len(new_exchanges_list)
-                update_session_offset(conn, session_id, new_offset, total_count, commit=False)
-            else:
-                update_session_offset(conn, session_id, new_offset, existing_count, commit=False)
-
-        # Auto-tag and auto-detect only on new exchanges (incremental, not full scan)
-        if new_exchanges_list:
-            _store_auto_tags(conn, session_id, new_exchanges_list, commit=False)
-            auto_detect_highlights(conn, session_id, new_exchanges_list, commit=False)
+        # At prompt-submit time no turn is in flight, so every turn on disk is
+        # complete: the trailing group may be consumed (final=True).
+        index_transcript(conn, session_id, transcript_path,
+                         project_path=project_path, project_hash=project_hash,
+                         final=True)
 
         # Check connections for incoming highlights (updates written with commit=False)
         connection_msg = _check_connections(conn, session_id)
@@ -493,7 +595,7 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
         # Single commit covering all writes above
         conn.commit()
 
-        # Handle /recall
+        # Handle /recall (user-facing observability notice — systemMessage is right here)
         if user_prompt.strip().lower().startswith('/recall'):
             updated = get_session(conn, session_id)
             exchange_count = updated['exchange_count'] or 0 if updated else 0
@@ -502,13 +604,14 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
                 "systemMessage": f"[Observability] Context recall logged at exchange #{exchange_count}"
             }
 
-        # Proactive recall suggestion (deterministic; gated on skill_enabled)
+        # Proactive recall suggestion (deterministic; gated on skill_enabled).
+        # Claude must ACT on this, so it goes into its context, not to the user.
         suggestion = _maybe_suggest_recall(conn, session_id, user_prompt)
         if suggestion:
-            return {"systemMessage": suggestion}
+            return _hook_context(suggestion)
 
         if connection_msg:
-            return {"systemMessage": connection_msg}
+            return _hook_context(connection_msg)
 
         return {}
 

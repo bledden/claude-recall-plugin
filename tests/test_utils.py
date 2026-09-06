@@ -177,9 +177,16 @@ class TestFormatFunctions(unittest.TestCase):
         self.assertIn('5', result)
 
     def test_get_date_from_timestamp(self):
-        """Test extracting date from timestamp."""
-        result = get_date_from_timestamp('2026-01-05T14:30:00Z')
-        self.assertEqual(result, '2026-01-05')
+        """Extracts the LOCAL date (what the user sees), not the UTC date."""
+        from datetime import timezone
+        expected = (datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+                    .astimezone().date().isoformat())
+        self.assertEqual(get_date_from_timestamp('2026-01-05T14:30:00Z'), expected)
+        # 23:30Z is the next local day anywhere east of UTC+0:30 and the same
+        # day west of it; either way it must agree with astimezone().
+        expected2 = (datetime(2026, 1, 5, 23, 30, tzinfo=timezone.utc)
+                     .astimezone().date().isoformat())
+        self.assertEqual(get_date_from_timestamp('2026-01-05T23:30:00Z'), expected2)
 
     def test_empty_timestamp(self):
         """Test formatting empty timestamp."""
@@ -206,16 +213,34 @@ class TestSearchInText(unittest.TestCase):
 class TestFindExchangesByTime(unittest.TestCase):
     """Tests for find_exchanges_by_time function."""
 
+    @staticmethod
+    def _local(hour):
+        """A stored (UTC, 'Z') timestamp for today at *hour* o'clock LOCAL time."""
+        from datetime import timezone
+        loc = datetime.now().astimezone().replace(hour=hour, minute=0, second=0, microsecond=0)
+        return loc.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
     def test_find_closest(self):
-        """Test finding exchanges closest to target time."""
+        """Closest exchange to a LOCAL wall-clock target (the user's '2:30pm')."""
         exchanges = [
-            {'idx': 1, 'timestamp': '2026-01-05T10:00:00Z'},
-            {'idx': 2, 'timestamp': '2026-01-05T14:00:00Z'},
-            {'idx': 3, 'timestamp': '2026-01-05T18:00:00Z'},
+            {'idx': 1, 'timestamp': self._local(10)},
+            {'idx': 2, 'timestamp': self._local(14)},
+            {'idx': 3, 'timestamp': self._local(18)},
         ]
-        target = datetime(2026, 1, 5, 14, 30)
-        result = find_exchanges_by_time(exchanges, target, window=3)
-        self.assertIn(2, result)  # 2pm should be closest to 2:30pm
+        target = datetime.now().replace(hour=14, minute=30)
+        result = find_exchanges_by_time(exchanges, target, window=1)
+        self.assertEqual(result, [2])  # 2pm local is closest to 2:30pm local
+
+    def test_target_is_compared_in_local_time_not_utc(self):
+        """Regression: stored timestamps are UTC; the target is local. Before
+        v2.3 the hours were compared raw, so 'around 2pm' matched 2pm UTC."""
+        exchanges = [
+            {'idx': 1, 'timestamp': self._local(9)},
+            {'idx': 2, 'timestamp': self._local(14)},
+            {'idx': 3, 'timestamp': self._local(20)},
+        ]
+        target = datetime.now().replace(hour=14, minute=0)
+        self.assertEqual(find_exchanges_by_time(exchanges, target, window=1), [2])
 
     def test_empty_exchanges(self):
         """Test with empty exchanges list."""

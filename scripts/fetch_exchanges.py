@@ -344,6 +344,7 @@ def main():
                     print("*--all: could not resolve a project hash.*")
                     return
                 results = search_exchanges_fts(conn, keyword, project_hash=project_hash, limit=20)
+                results.reverse()  # newest-20 from the DB, shown oldest→newest for reading
                 if not results:
                     print(f"*No exchanges found matching '{keyword}' in this project.*")
                     return
@@ -357,6 +358,7 @@ def main():
                 return
 
             results = search_exchanges_fts(conn, keyword, session_id=session_id, limit=10)
+            results.reverse()  # newest-10 from the DB, shown oldest→newest for reading
             if not results:
                 print(f"*No exchanges found matching '{keyword}'*")
                 print("*Search looks in both user prompts AND assistant responses.*")

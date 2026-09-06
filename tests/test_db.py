@@ -618,5 +618,63 @@ class TestHighlightsForConnections(unittest.TestCase):
         self.assertEqual(len(results), 2)
 
 
+class TestSearchOrderingAndStemming(unittest.TestCase):
+    """v2.3: search surfaces the MOST RECENT matches, and stems terms."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, 'test.db')
+        self.conn = get_connection(self.db_path)
+        insert_session(self.conn, 'sess-ord', '/p', 'hord', '2025-01-01T00:00:00Z')
+        insert_exchanges(self.conn, 'sess-ord', [
+            {'idx': i, 'timestamp': f'2025-01-01T{i:02d}:00:00Z', 'preview': f'p{i}',
+             'user_text': f'kernel question {i}', 'assistant_text': f'answer {i}'}
+            for i in range(15)
+        ])
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_limit_keeps_the_most_recent_matches(self):
+        rows = search_exchanges_fts(self.conn, 'kernel', session_id='sess-ord', limit=10)
+        idxs = [r['idx'] for r in rows]
+        self.assertEqual(idxs, list(range(14, 4, -1)))   # newest first, oldest 5 cut
+
+    def test_global_search_is_newest_first(self):
+        rows = search_exchanges_global(self.conn, 'kernel', limit=3)
+        self.assertEqual([r['idx'] for r in rows], [14, 13, 12])
+
+    def test_porter_stemming_matches_plural(self):
+        insert_exchanges(self.conn, 'sess-ord', [
+            {'idx': 99, 'timestamp': '2025-01-02T00:00:00Z', 'preview': 'k',
+             'user_text': 'we tuned the kernels', 'assistant_text': 'nice'}])
+        hits = [r['idx'] for r in search_exchanges_fts(self.conn, 'kernel', session_id='sess-ord', limit=50)]
+        self.assertIn(99, hits)
+        hits2 = [r['idx'] for r in search_exchanges_fts(self.conn, 'kernels', session_id='sess-ord', limit=50)]
+        self.assertGreaterEqual(len(hits2), 15)
+
+    def test_fts_table_uses_porter_tokenizer(self):
+        sql = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='exchanges_fts'").fetchone()[0]
+        self.assertIn('porter', sql)
+
+    def test_v3_store_is_rebuilt_to_v4(self):
+        """A pre-v4 store (no stemming) is migrated: FTS recreated + rebuilt."""
+        self.conn.executescript(
+            "DROP TABLE exchanges_fts;"
+            "CREATE VIRTUAL TABLE exchanges_fts USING fts5("
+            "  user_text, assistant_text, preview, content=exchanges, content_rowid=id);"
+            "INSERT INTO exchanges_fts(exchanges_fts) VALUES('rebuild');"
+            "PRAGMA user_version = 3;")
+        self.conn.commit(); self.conn.close()
+        self.conn = get_connection(self.db_path)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 4)
+        sql = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='exchanges_fts'").fetchone()[0]
+        self.assertIn('porter', sql)
+        self.assertEqual(len(search_exchanges_fts(self.conn, 'kernel', session_id='sess-ord', limit=50)), 15)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -263,23 +263,32 @@ class TestSearchNoResults(unittest.TestCase):
 
 class TestAroundTimeFindsClosest(unittest.TestCase):
 
+    @staticmethod
+    def _local_exchanges():
+        """Exchanges at 9:00, 9:20, 9:40, 10:00 LOCAL time, stored as UTC 'Z'."""
+        from datetime import datetime, timezone
+        out = []
+        for idx, (h, m) in enumerate([(9, 0), (9, 20), (9, 40), (10, 0)], 1):
+            loc = datetime.now().astimezone().replace(hour=h, minute=m, second=0, microsecond=0)
+            out.append({'idx': idx,
+                        'timestamp': loc.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')})
+        return out
+
     def test_finds_exchange_around_9am(self):
         from datetime import datetime
         from utils import find_exchanges_by_time
 
         target = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
-        indices = find_exchanges_by_time(SAMPLE_EXCHANGES, target)
-        # Exchange #1 is at 9:00 — should be in result
-        self.assertIn(1, indices)
+        indices = find_exchanges_by_time(self._local_exchanges(), target)
+        self.assertIn(1, indices)   # #1 is at 9:00 local
 
     def test_finds_exchange_around_10am(self):
         from datetime import datetime
         from utils import find_exchanges_by_time
 
         target = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
-        indices = find_exchanges_by_time(SAMPLE_EXCHANGES, target)
-        # Exchange #4 is at 10:00
-        self.assertIn(4, indices)
+        indices = find_exchanges_by_time(self._local_exchanges(), target)
+        self.assertIn(4, indices)   # #4 is at 10:00 local
 
 
 # ---------------------------------------------------------------------------

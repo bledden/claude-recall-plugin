@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """SessionEnd hook for Claude Context Recall plugin v2.
 
-Runs when a Claude session ends.  Marks the session as ended in the SQLite
-database by recording the current UTC timestamp in the ended_at column.
+Runs when a Claude session ends.  Indexes whatever the transcript still holds
+(so the session's final turn is captured), then marks the session as ended by
+recording the current UTC timestamp in the ended_at column.
 """
 
 import json
@@ -11,8 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
+sys.path.insert(0, str(Path(__file__).parent))            # hooks/  (prompt_submit)
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 from db import get_connection, get_session, end_session, DB_PATH
+from prompt_submit import index_transcript
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +43,16 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
         session = get_session(conn, session_id)
         if session is None:
             return {}
+
+        # Final catch-up: the session is over, so every turn on disk is
+        # complete and may be consumed (final=True).
+        transcript_path = input_data.get('transcript_path') or session.get('transcript_path') or ''
+        if transcript_path:
+            index_transcript(conn, session_id, transcript_path,
+                             project_path=session.get('project_path') or input_data.get('cwd', ''),
+                             project_hash=session.get('project_hash') or '',
+                             final=True)
+            conn.commit()
 
         ended_at = datetime.now(timezone.utc).isoformat()
         end_session(conn, session_id, ended_at)

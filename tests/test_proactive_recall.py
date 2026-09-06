@@ -45,8 +45,11 @@ class TestProactiveRecallSuggestion(unittest.TestCase):
         self._run('s1', 'hello')          # create the session row
         self._enable_skill('s1')
         result = self._run('s1', "wait, didn't we already discuss the cache fix?")
-        self.assertIn('systemMessage', result)
-        self.assertIn('recall', result['systemMessage'].lower())
+        # Must be additionalContext: systemMessage is shown to the user only.
+        self.assertNotIn('systemMessage', result)
+        ctx = result['hookSpecificOutput']['additionalContext']
+        self.assertEqual(result['hookSpecificOutput']['hookEventName'], 'UserPromptSubmit')
+        self.assertIn('recall', ctx.lower())
 
     def test_no_suggestion_when_skill_disabled(self):
         self._run('s2', 'hello')          # skill_enabled defaults to false

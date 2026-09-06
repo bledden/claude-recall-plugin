@@ -24,9 +24,10 @@ DB_PATH = DB_DIR / 'recall.db'
 DB_BUSY_TIMEOUT_MS = 5000
 
 # Current on-disk schema version, tracked via SQLite's PRAGMA user_version.
-# Bump this and add a branch in _apply_migrations() whenever the schema changes
-# (e.g. the v3 vector/tier tables would be version 3).
-SCHEMA_VERSION = 3
+# Bump this and add a branch in _apply_migrations() whenever the schema changes.
+#   v3: invocations table (usage counter)
+#   v4: FTS5 tokenizer switched to porter stemming (rebuilds exchanges_fts)
+SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Schema SQL
@@ -71,7 +72,8 @@ CREATE TABLE IF NOT EXISTS tags (
 -- Direct modifications to the exchanges table will corrupt the FTS index.
 CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
     user_text, assistant_text, preview,
-    content=exchanges, content_rowid=id
+    content=exchanges, content_rowid=id,
+    tokenize='porter unicode61'
 );
 
 -- Note: exchanges(session_id, idx) is already covered by the UNIQUE constraint.
@@ -159,6 +161,10 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     ).fetchone()
     if row is None:
         conn.executescript(_SCHEMA_SQL)
+        # A fresh store is already at the current schema — stamp it so no
+        # migration (e.g. the v4 FTS rebuild) runs needlessly.
+        conn.execute("PRAGMA user_version = {}".format(SCHEMA_VERSION))
+        conn.commit()
 
     _apply_migrations(conn)
 
@@ -185,6 +191,17 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             "  ts TEXT NOT NULL, session_id TEXT, project_hash TEXT,"
             "  command TEXT NOT NULL, args TEXT);"
             "CREATE INDEX IF NOT EXISTS idx_invocations_ts ON invocations(ts);"
+        )
+    if current < 4:
+        # v4: porter stemming so 'kernel' matches 'kernels'. The FTS table is
+        # external-content, so drop + recreate with the new tokenizer and
+        # rebuild it from the exchanges table (fast: FTS5 'rebuild' command).
+        conn.executescript(
+            "DROP TABLE IF EXISTS exchanges_fts;"
+            "CREATE VIRTUAL TABLE exchanges_fts USING fts5("
+            "  user_text, assistant_text, preview,"
+            "  content=exchanges, content_rowid=id, tokenize='porter unicode61');"
+            "INSERT INTO exchanges_fts(exchanges_fts) VALUES('rebuild');"
         )
     conn.execute("PRAGMA user_version = {}".format(SCHEMA_VERSION))
     conn.commit()
@@ -485,6 +502,10 @@ def search_exchanges_fts(conn: sqlite3.Connection, query: str,
         params.append(project_hash)
 
     sql += " WHERE " + " AND ".join(wheres)
+    # Most recent matches first — without an ORDER BY, FTS5 returns rowid
+    # order, i.e. the OLDEST matches, which is the opposite of what a memory
+    # tool should surface under a LIMIT.
+    sql += " ORDER BY e.timestamp DESC, e.idx DESC"
     sql += " LIMIT ?"
     params.append(limit)
 
@@ -509,6 +530,7 @@ def search_exchanges_global(conn: sqlite3.Connection, query: str,
         "JOIN exchanges_fts fts ON e.id = fts.rowid "
         "JOIN sessions s ON e.session_id = s.session_id "
         "WHERE exchanges_fts MATCH ? "
+        "ORDER BY e.timestamp DESC "
         "LIMIT ?"
     )
     cur = conn.execute(sql, (safe_query, limit))

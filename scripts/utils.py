@@ -15,7 +15,8 @@ from typing import List, Dict, Any, Optional, Tuple
 
 # Configuration constants
 PREVIEW_LENGTH = 80
-MAX_CHARS_PER_MESSAGE = 1000
+MAX_CHARS_PER_MESSAGE = 1000      # user prompt cap
+MAX_ASSISTANT_CHARS = 4000        # assistant reply cap (all text blocks of the turn, merged)
 MAX_TOTAL_CHARS = 8000
 PAGE_SIZE = 20
 AROUND_TIME_WINDOW = 5
@@ -229,7 +230,9 @@ def get_date_from_timestamp(iso_timestamp: str) -> Optional[str]:
         return None
     try:
         dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
-        return dt.date().isoformat()
+        # Local date, so grouping headers and 'around <date>' agree with what the
+        # user sees (display already renders local time).
+        return dt.astimezone().date().isoformat()
     except (ValueError, TypeError):
         return None
 
@@ -270,7 +273,7 @@ def find_exchanges_by_time(
 
             for list_idx, (orig_idx, ex) in enumerate(date_matches):
                 try:
-                    ex_time = datetime.fromisoformat(ex['timestamp'].replace('Z', '+00:00'))
+                    ex_time = datetime.fromisoformat(ex['timestamp'].replace('Z', '+00:00')).astimezone()
                     ex_minutes = ex_time.hour * 60 + ex_time.minute
                     target_minutes = target_time.hour * 60 + target_time.minute
                     diff = abs(ex_minutes - target_minutes)
@@ -291,7 +294,7 @@ def find_exchanges_by_time(
 
     for i, ex in enumerate(exchanges):
         try:
-            ex_time = datetime.fromisoformat(ex['timestamp'].replace('Z', '+00:00'))
+            ex_time = datetime.fromisoformat(ex['timestamp'].replace('Z', '+00:00')).astimezone()
             ex_minutes = ex_time.hour * 60 + ex_time.minute
             target_minutes = target_time.hour * 60 + target_time.minute
             diff = abs(ex_minutes - target_minutes)
