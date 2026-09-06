@@ -1,10 +1,10 @@
 """Test isolation: never let the suite touch the user's real recall data.
 
-The recall event log (`log_recall_event`) wrote to a hardcoded
-`~/.claude/recall-events.log`, so running the tests polluted the production log
-with test session rows (the s1/s3 pollution we found). This autouse fixture
-points RECALL_LOG_FILE at a temp file for the whole test session; the DB is
-already isolated because tests pass an explicit `db_path`.
+Two leaks have bitten in the past: the event log was hardcoded to
+`~/.claude/recall-events.log` (fixed in 2.2.3 via RECALL_LOG_FILE), and
+`record_invocation()` opened the DEFAULT database from script `main()` calls
+(fixed in 2.3.1 via RECALL_DB). This autouse fixture redirects both, and unsets
+CLAUDE_CODE_SESSION_ID so nothing is attributed to a live session.
 """
 
 import os
@@ -14,14 +14,26 @@ import pytest
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _isolate_recall_log():
-    tmpdir = tempfile.mkdtemp(prefix="recall-test-log-")
-    prev = os.environ.get("RECALL_LOG_FILE")
+def _isolate_recall_store():
+    """Point BOTH the event log and the default DB at temp files.
+
+    Tests pass an explicit db_path for their own data, but every script
+    ``main()`` calls ``record_invocation()``, which opens ``get_connection()``
+    with NO path -> the user's real ``recall.db`` unless RECALL_DB is set. Before
+    this fixture, each suite run appended fixture invocations (``last0``,
+    ``last-3``, ``search xyzzy...``) to the real store and could even migrate its
+    schema. Also drop the session id so nothing is attributed to a live session.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="recall-test-")
+    saved = {k: os.environ.get(k) for k in ("RECALL_LOG_FILE", "RECALL_DB", "CLAUDE_CODE_SESSION_ID")}
     os.environ["RECALL_LOG_FILE"] = os.path.join(tmpdir, "recall-events.log")
+    os.environ["RECALL_DB"] = os.path.join(tmpdir, "recall.db")
+    os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
     try:
         yield
     finally:
-        if prev is None:
-            os.environ.pop("RECALL_LOG_FILE", None)
-        else:
-            os.environ["RECALL_LOG_FILE"] = prev
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

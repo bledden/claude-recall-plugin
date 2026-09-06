@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-09-05
+
+### Fixed
+- **The test suite wrote into the user's real `recall.db`.** Every script `main()` calls `record_invocation()`, which opens the default database; `conftest.py` isolated only the event log, so each `pytest` run appended fixture invocations (`last0`, `last-3`, `search authentication`, ...) to the live store and could migrate its schema ahead of the installed plugin. The autouse fixture now sets `RECALL_DB` (and unsets `CLAUDE_CODE_SESSION_ID`) for the whole run; a suite run adds 0 rows to the real store.
+
 ## [2.3.0] - 2026-09-05
 
 Fidelity release. A fresh-eyes review found that the plugin's own "verbatim memory" claim was not true in practice; this release makes it true.

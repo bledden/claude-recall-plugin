@@ -1,4 +1,4 @@
-# Claude Recall Plugin v2.3.0
+# Claude Recall Plugin v2.3.1
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events. It adds cross-session search, tagging, highlight sharing between sessions, and observability.
 
@@ -534,7 +534,7 @@ wc -l ~/.claude/recall-events.log
 ```
 claude-recall-plugin/
 ├── .claude-plugin/
-│   └── plugin.json                  # Plugin metadata (v2.3.0)
+│   └── plugin.json                  # Plugin metadata (v2.3.1)
 ├── commands/
 │   └── recall.md                    # The /recall command definition
 ├── skills/
