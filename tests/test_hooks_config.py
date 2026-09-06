@@ -1,32 +1,50 @@
 #!/usr/bin/env python3
-"""WI-4 + WI-1: hooks.json must register CURRENT Claude Code events.
+"""hooks.json must register the events recall actually relies on (v2.3).
 
-- 'PreCompact' is the real compaction event ('PostCompact' is not, so the
-  nudge never fired in production).
-- A 'SessionStart' hook is needed to export RECALL_SESSION_ID/HASH (WI-1).
+- 'Stop' indexes every completed turn (the final turn of a session used to be
+  lost because capture only ran on the *next* prompt).
+- 'SessionStart' with matcher 'compact' carries the post-compaction nudge as
+  additionalContext; 'PreCompact' cannot inject context and is gone.
+- 'SessionStart' (any) exports the legacy env fallback; 'SessionEnd' finalizes.
 """
 
 import json
 import unittest
 from pathlib import Path
 
-HOOKS_JSON = Path(__file__).parent.parent / 'hooks' / 'hooks.json'
+ROOT = Path(__file__).parent.parent
+HOOKS_JSON = ROOT / 'hooks' / 'hooks.json'
 
 
 class TestHooksConfig(unittest.TestCase):
     def setUp(self):
         self.hooks = json.loads(HOOKS_JSON.read_text())['hooks']
 
-    def test_uses_precompact_not_postcompact(self):
-        self.assertIn('PreCompact', self.hooks)
-        self.assertNotIn('PostCompact', self.hooks)
+    def test_registers_stop_for_per_turn_capture(self):
+        self.assertIn('Stop', self.hooks)
+        cmds = [h['command'] for e in self.hooks['Stop'] for h in e['hooks']]
+        self.assertTrue(any('hooks/stop.py' in c for c in cmds))
 
-    def test_registers_sessionstart(self):
+    def test_compaction_nudge_rides_on_sessionstart_compact(self):
+        self.assertNotIn('PreCompact', self.hooks)   # cannot inject context
+        self.assertNotIn('PostCompact', self.hooks)  # not a real event
+        matchers = {e.get('matcher') for e in self.hooks['SessionStart']}
+        self.assertIn('compact', matchers)
+        compact_cmds = [h['command'] for e in self.hooks['SessionStart']
+                        if e.get('matcher') == 'compact' for h in e['hooks']]
+        self.assertTrue(any('post_compact.py' in c for c in compact_cmds))
+
+    def test_keeps_sessionstart_promptsubmit_sessionend(self):
         self.assertIn('SessionStart', self.hooks)
-
-    def test_keeps_userpromptsubmit_and_sessionend(self):
         self.assertIn('UserPromptSubmit', self.hooks)
         self.assertIn('SessionEnd', self.hooks)
+
+    def test_every_referenced_script_exists(self):
+        for event, entries in self.hooks.items():
+            for entry in entries:
+                for h in entry['hooks']:
+                    script = h['command'].split('${CLAUDE_PLUGIN_ROOT}/')[-1]
+                    self.assertTrue((ROOT / script).exists(), f"{event}: {script} missing")
 
     def test_hook_commands_have_python_fallback(self):
         """Hooks must not hard-code bare `python3` — on Linux boxes where

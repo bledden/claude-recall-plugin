@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""PostCompact nudge hook for Claude Context Recall plugin v2.
+"""Post-compaction recovery hook for Claude Context Recall plugin.
 
-Runs after a context compaction event.  Injects a systemMessage summarising
-session history so the model can recover relevant context after compaction.
+Registered on ``SessionStart`` with ``matcher: "compact"``, i.e. it runs when
+the session resumes *after* a compaction.  It returns
+``hookSpecificOutput.additionalContext`` — the only hook output Claude actually
+reads — summarising what this session and project have indexed, so the model
+knows to run ``/recall`` for anything the summary dropped.
+
+(``PreCompact`` cannot inject context at all, and ``systemMessage`` is shown to
+the user only; both were used before v2.3, so the nudge never reached Claude.)
 """
 
 import json
@@ -68,17 +74,18 @@ def build_nudge_message(
 # ---------------------------------------------------------------------------
 
 def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
-    """PostCompact hook logic, separated from stdin/stdout for testability.
+    """Post-compaction (SessionStart/compact) hook logic, separated from stdin/stdout.
 
     Queries the DB for the current session's stats and builds a nudge message
-    that is returned as a systemMessage to help Claude recover context.
+    that is returned as additionalContext so Claude actually reads it.
 
     Args:
         input_data: Dict parsed from the hook's stdin JSON.
         db_path: Override path for the database (used in tests).
 
     Returns:
-        {"systemMessage": <nudge>} on success, {} if session unknown.
+        {"hookSpecificOutput": {..., "additionalContext": <nudge>}} on success,
+        {} if session unknown.
     """
     session_id = input_data.get('session_id')
     if not session_id:
@@ -125,7 +132,8 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
             tags=tags,
         )
 
-        return {"systemMessage": nudge}
+        return {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                       "additionalContext": nudge}}
 
     finally:
         conn.close()
@@ -143,9 +151,9 @@ def main():
         result = run_hook(input_data)
         print(json.dumps(result), file=sys.stdout)
     except Exception as e:
-        print(f"[context-recall] PostCompact error: {e}", file=sys.stderr)
+        print(f"[context-recall] compact-recovery hook error: {e}", file=sys.stderr)
         error_output = {
-            "systemMessage": "[context-recall] PostCompact hook encountered an error. Check logs for details."
+            "systemMessage": "[context-recall] compact-recovery hook encountered an error. Check logs for details."
         }
         print(json.dumps(error_output), file=sys.stdout)
     finally:

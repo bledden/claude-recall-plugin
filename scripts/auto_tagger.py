@@ -135,6 +135,8 @@ def is_technical_term(term: str) -> bool:
     Returns:
         bool
     """
+    if term.isdigit():
+        return False  # bare numbers (line counts, ids) are noise, not topics
     if '-' in term or '_' in term or any(c.isdigit() for c in term):
         return True
     return term not in STOPWORDS and term not in GENERIC_PROGRAMMING_TERMS

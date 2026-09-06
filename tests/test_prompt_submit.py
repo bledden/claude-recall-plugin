@@ -272,10 +272,12 @@ class TestRunHook(unittest.TestCase):
         # Run hook for watcher — counter starts at 0, interval=1, so 0+1 >= 1 → fires
         result = run_hook(self._base_input(session_id=watcher_id), db_path=self.db_path)
 
-        self.assertIn('systemMessage', result)
-        self.assertIn('Cross-session', result['systemMessage'])
-        self.assertIn('Fixed coalescing bug', result['systemMessage'])
-        self.assertIn(target_id[:8], result['systemMessage'])
+        # Injected highlights are for Claude to act on -> additionalContext.
+        self.assertNotIn('systemMessage', result)
+        ctx = result['hookSpecificOutput']['additionalContext']
+        self.assertIn('Cross-session', ctx)
+        self.assertIn('Fixed coalescing bug', ctx)
+        self.assertIn(target_id[:8], ctx)
 
     def test_auto_detect_runs_when_enabled(self):
         """Test that auto_detect_highlights runs in the hook when config is set."""
@@ -446,6 +448,152 @@ class TestParseTranscriptFromOffset(unittest.TestCase):
         self.assertEqual(messages[0]['text'], 'Second question')
         self.assertEqual(messages[1]['text'], 'Second answer')
         self.assertGreater(new_offset, mid_offset)
+
+
+# ---------------------------------------------------------------------------
+# v2.3 fidelity: merged assistant blocks, held-back incomplete tails, rolling tags
+# ---------------------------------------------------------------------------
+
+import json as _json
+import prompt_submit as _ps
+from db import get_tags as _get_tags
+
+
+def _entry(role, text, ts):
+    return {'type': role, 'timestamp': ts,
+            'message': {'role': role, 'content': [{'type': 'text', 'text': text}]}}
+
+
+def _append(path, *entries):
+    with open(path, 'a', encoding='utf-8') as f:
+        for e in entries:
+            f.write(_json.dumps(e) + '\n')
+
+
+class TestAssistantBlockMerging(unittest.TestCase):
+    """All assistant text of a turn is kept, not just the first block."""
+
+    def test_all_assistant_blocks_of_a_turn_are_kept(self):
+        messages = [
+            {'role': 'user', 'text': 'Q1', 'timestamp': 't1'},
+            {'role': 'assistant', 'text': 'Let me look.', 'timestamp': 't2'},
+            {'role': 'assistant', 'text': 'Found it.', 'timestamp': 't3'},
+            {'role': 'assistant', 'text': 'The answer is 42.', 'timestamp': 't4'},
+            {'role': 'user', 'text': 'Q2', 'timestamp': 't5'},
+            {'role': 'assistant', 'text': 'A2', 'timestamp': 't6'},
+        ]
+        ex = build_new_exchanges(messages)
+        self.assertEqual(len(ex), 2)
+        self.assertIn('Let me look.', ex[0]['assistant_text'])
+        self.assertIn('Found it.', ex[0]['assistant_text'])
+        self.assertIn('The answer is 42.', ex[0]['assistant_text'])
+        self.assertEqual(ex[1]['assistant_text'], 'A2')
+
+    def test_assistant_cap_is_4000_chars(self):
+        messages = [{'role': 'user', 'text': 'Q', 'timestamp': ''},
+                    {'role': 'assistant', 'text': 'x' * 5000, 'timestamp': ''}]
+        ex = build_new_exchanges(messages)
+        self.assertTrue(ex[0]['assistant_text'].startswith('x' * 4000))
+        self.assertIn('[...truncated...]', ex[0]['assistant_text'])
+        self.assertLess(len(ex[0]['assistant_text']), 4100)
+
+    def test_user_cap_stays_1000_chars(self):
+        messages = [{'role': 'user', 'text': 'u' * 2000, 'timestamp': ''},
+                    {'role': 'assistant', 'text': 'A', 'timestamp': ''}]
+        ex = build_new_exchanges(messages)
+        self.assertTrue(ex[0]['user_text'].startswith('u' * 1000))
+        self.assertIn('[...truncated...]', ex[0]['user_text'])
+
+
+class TestIncompleteTailHeldBack(unittest.TestCase):
+    """The indexer never advances past a turn it cannot prove complete."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = Path(self.tmp) / 'test.db'
+        self.tp = str(Path(self.tmp) / 't.jsonl')
+        self.sid = 'sess-tail'
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self):
+        return run_hook({'session_id': self.sid, 'transcript_path': self.tp,
+                         'prompt': 'x', 'cwd': '/tmp/p'}, db_path=self.db_path)
+
+    def _exchanges(self):
+        conn = get_connection(self.db_path)
+        try:
+            return get_exchanges(conn, self.sid)
+        finally:
+            conn.close()
+
+    def test_trailing_user_without_reply_is_not_consumed(self):
+        _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'A1', 't2'),
+                _entry('user', 'Q2', 't3'))
+        self._run()
+        ex = self._exchanges()
+        self.assertEqual([e['user_text'] for e in ex], ['Q1'])
+        conn = get_connection(self.db_path)
+        offset = get_session(conn, self.sid)['byte_offset']; conn.close()
+        self.assertLess(offset, os.path.getsize(self.tp), "Q2 must remain unread")
+        # The reply arrives; the next run pairs Q2 with it.
+        _append(self.tp, _entry('assistant', 'A2', 't4'))
+        self._run()
+        ex = self._exchanges()
+        self.assertEqual([e['user_text'] for e in ex], ['Q1', 'Q2'])
+        self.assertEqual(ex[1]['assistant_text'], 'A2')
+
+    def test_size_cap_mid_turn_holds_back_partial_turn(self):
+        _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'part one', 't2'),
+                _entry('assistant', 'part two', 't3'), _entry('assistant', 'part three', 't4'))
+        prev = _ps.MAX_MESSAGES_PER_READ
+        _ps.MAX_MESSAGES_PER_READ = 2   # read stops after Q1 + 'part one' (not EOF)
+        try:
+            self._run()
+            self.assertEqual(self._exchanges(), [], "a partial turn must not be stored")
+        finally:
+            _ps.MAX_MESSAGES_PER_READ = prev
+        self._run()
+        ex = self._exchanges()
+        self.assertEqual(len(ex), 1)
+        for part in ('part one', 'part two', 'part three'):
+            self.assertIn(part, ex[0]['assistant_text'])
+
+
+class TestRollingAutoTags(unittest.TestCase):
+    """A term that recurs across several prompts gets tagged (window, not batch)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = Path(self.tmp) / 'test.db'
+        self.tp = str(Path(self.tmp) / 't.jsonl')
+        self.sid = 'sess-tags'
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self):
+        run_hook({'session_id': self.sid, 'transcript_path': self.tp,
+                  'prompt': 'x', 'cwd': '/tmp/p'}, db_path=self.db_path)
+
+    def _auto_tags(self):
+        conn = get_connection(self.db_path)
+        try:
+            return {t['tag'] for t in _get_tags(conn, session_id=self.sid) if t['source'] == 'auto'}
+        finally:
+            conn.close()
+
+    def test_term_across_three_prompts_is_tagged(self):
+        turns = [('hyperkernel launch failed', 'checking'),
+                 ('retry the hyperkernel now', 'retrying'),
+                 ('did the hyperkernel work', 'yes')]
+        for i, (q, a) in enumerate(turns):
+            _append(self.tp, _entry('user', q, f't{2*i}'), _entry('assistant', a, f't{2*i+1}'))
+            self._run()
+            if i < 2:
+                self.assertNotIn('hyperkernel', self._auto_tags())
+        self.assertIn('hyperkernel', self._auto_tags())
 
 
 if __name__ == '__main__':

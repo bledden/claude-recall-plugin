@@ -1,6 +1,6 @@
 # Privacy Policy — Claude Recall Plugin
 
-**Last updated:** July 15, 2026
+**Last updated:** September 5, 2026
 
 ## What Data Is Stored
 
@@ -8,7 +8,7 @@ The recall plugin stores conversation data locally on your machine to enable con
 
 | Data | Location | Purpose |
 |---|---|---|
-| Exchange text | `~/.claude/context-recall/recall.db` | User prompts and assistant responses (truncated to 1000 chars each) for search and recall |
+| Exchange text | `~/.claude/context-recall/recall.db` | User prompts (up to 1,000 chars) and assistant responses (all text blocks of the turn merged, up to 4,000 chars) for search and recall |
 | Session metadata | Same DB | Session IDs, project paths, timestamps, byte offsets for incremental indexing |
 | Auto-tags | Same DB | Technical terms extracted from exchange text for search and discovery |
 | Manual tags | Same DB | User-applied tags for organizing sessions and exchanges |
@@ -31,7 +31,7 @@ The database directory is created with restricted permissions (0o700 — owner-o
 
 ## What Data Is NOT Stored
 
-- Full conversation transcripts (only truncated exchange text — up to 1000 chars per message)
+- Full conversation transcripts (only truncated exchange text: up to 1,000 chars per user prompt and 4,000 chars per assistant reply; tool calls, tool output and thinking are never stored)
 - Passwords, API keys, or credentials
 - System information beyond project directory paths
 - Any data from other applications

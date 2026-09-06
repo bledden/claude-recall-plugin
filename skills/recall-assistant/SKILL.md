@@ -19,9 +19,10 @@ When `skill_enabled` is true, watch for signals that you have lost earlier conve
 
 > **Hook-backed (reliable):** when `skill_enabled` is true, the `UserPromptSubmit`
 > hook already detects these explicit phrases *deterministically* and injects a
-> `[Recall]` suggestion — so this signal no longer depends on you noticing. When
-> you see that injected suggestion, act on it (run the appropriate recall). The
-> behavioral and temporal signals below remain model-driven.
+> `[Recall]` suggestion into your context as a system reminder — so this signal
+> no longer depends on you noticing. When you see that reminder, act on it (run
+> the appropriate recall). The behavioral and temporal signals below remain
+> model-driven.
 
 Watch for the user saying things like:
 - "didn't we already discuss..."
@@ -52,7 +53,7 @@ Example:
 ### Temporal Signals
 
 Watch for environmental cues:
-- A PostCompact nudge just appeared in your context (the system message starting with "[Context Compacted]")
+- A post-compaction recovery note just appeared in your context (the system reminder starting with "[Context Compacted]")
 - The conversation has been going for a long time (50+ exchanges)
 - The conversation spans multiple days
 

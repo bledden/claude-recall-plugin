@@ -282,13 +282,21 @@ class TestLargeExchangeCount(unittest.TestCase):
                         f"FTS search took {elapsed_ms:.1f}ms, expected < 100ms")
 
     def test_incremental_insert_100_more(self):
-        """Inserting 100 more exchanges increments total to 2100."""
+        """Inserting 100 more exchanges on top of a 2000-exchange session.
+
+        Uses its OWN session so it never mutates the class-wide fixture: the
+        suite runs under pytest-randomly, and a shared-fixture mutation made
+        the sibling count/tail tests fail whenever this ran first.
+        """
+        sid = 'sess-big-incremental'
+        insert_session(self.conn, sid, '/bigproject', 'bighash', _make_timestamp(0))
+        insert_exchanges(self.conn, sid, [_make_exchange(i, i, i) for i in range(2000)])
         extra = [_make_exchange(2000 + i, i, 2000 + i) for i in range(100)]
-        insert_exchanges(self.conn, self.session_id, extra)
-        rows = get_exchanges(self.conn, self.session_id)
+        insert_exchanges(self.conn, sid, extra)
+        rows = get_exchanges(self.conn, sid)
         self.assertEqual(len(rows), 2100)
         # Verify the new tail is correct
-        tail = get_exchanges(self.conn, self.session_id, last_n=5)
+        tail = get_exchanges(self.conn, sid, last_n=5)
         self.assertEqual(tail[-1]['idx'], 2099)
 
 
