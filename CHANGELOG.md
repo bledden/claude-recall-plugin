@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-09-05
+
+Fidelity release. A fresh-eyes review found that the plugin's own "verbatim memory" claim was not true in practice; this release makes it true.
+
+### Fixed
+- **71% of assistant text was discarded.** Exchanges paired a user message with only the *next* assistant message; in agentic turns Claude's reply arrives as several text blocks separated by tool calls, and every block after the first was dropped (measured on a real transcript: 384 of 544 assistant messages; 43% of stored replies were sub-200-char preambles). All assistant text between two user prompts is now merged into one `assistant_text`. Replaying the same transcript through the new indexer retains 95% of Claude's reply text (was 15%); preamble-only replies drop from 70 to 10 of 161.
+- **The final turn of every session was never indexed.** Capture ran only on the *next* prompt and `SessionEnd` only stamped `ended_at` (6 of 6 recently ended sessions were missing their last exchange). A new `Stop` hook indexes each turn as it completes, and `SessionEnd` runs a final catch-up.
+- **Nothing the plugin injected ever reached Claude.** The compaction nudge, the proactive `[Recall]` suggestion and `delivery_mode inject` all returned `systemMessage`, which Claude Code shows to the *user* only. They now return `hookSpecificOutput.additionalContext`. The compaction nudge moves from `PreCompact` (which cannot inject context at all) to `SessionStart` with `matcher: "compact"`.
+- **Search returned the oldest matches.** `search_exchanges_fts`/`search_exchanges_global` had no `ORDER BY`, so under a `LIMIT` FTS5 returned rowid order (a 68-hit term returned idx 1..13 of 158). Results are now newest-first from the index (shown in reading order for session/project searches).
+- **`around <time>` compared UTC hours to a local target** (the 2.2.1 fix covered `show_index` only), so "around 2pm" matched 2pm UTC. `find_exchanges_by_time` and date grouping now use local time.
+- Auto-tagging almost never fired in normal use: `min_frequency` was applied to the exchanges of a single prompt. Tags are now computed over a rolling window of the session's last 50 exchanges; bare numbers are no longer tag candidates.
+- `commands/recall.md` allowed only `Bash(python3:*)` while the hooks fall back to `python`; `Bash(python:*)` is now allowed too.
+
+### Added
+- **Held-back incomplete turns.** The indexer never advances past a turn it cannot prove complete: a trailing user message with no reply is left for the next run, a read that stopped at the size cap does not commit its last group, and at `Stop` the trailing turn is consumed only once the payload's `last_assistant_message` has reached the transcript file (the file can lag the in-memory turn). This is what makes per-turn capture and block merging safe together.
+- Porter stemming for FTS5 ("kernel" matches "kernels"), via schema v4 which rebuilds the FTS index once.
+
+### Changed
+- Assistant replies are stored up to 4,000 chars (was 1,000) so the merged answer survives; user prompts stay at 1,000. See PRIVACY.md.
+- DB schema version 4.
+- Test suite: 425 tests; the scale stress test no longer mutates its shared fixture (it failed under `pytest-randomly`).
+
 ## [2.2.3] - 2026-07-02
 
 ### Added

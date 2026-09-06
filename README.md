@@ -1,10 +1,10 @@
-# Claude Recall Plugin v2.2.3
+# Claude Recall Plugin v2.3.0
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events. It adds cross-session search, tagging, highlight sharing between sessions, and observability.
 
-> **Marketplace Status:** Published in Anthropic's community marketplace (`recall@claude-community`). The catalog currently pins an older version while a refresh is in review ([claude-plugins-community#1121](https://github.com/anthropics/claude-plugins-community/issues/1121)); until it lands, install from the pre-built marketplace below to get the current release.
+> **Marketplace Status:** Published in Anthropic's community marketplace as `recall@claude-community` (`/plugin marketplace add anthropics/claude-plugins-community`, then install `recall`). The catalog tracks this repo's `main`.
 >
-> **Pre-built Marketplace:** [claude-recall-marketplace](https://github.com/bledden/claude-recall-marketplace) (always serves the latest release)
+> **Pre-built Marketplace:** [claude-recall-marketplace](https://github.com/bledden/claude-recall-marketplace) (the same release, and the only reliable path for the VSCode extension)
 
 ---
 
@@ -22,7 +22,7 @@ If you only need to re-anchor within the current session, native `/recap` / `/re
 
 ## Requirements
 
-- **Claude Code** 2.0.x or 2.1.x (see breaking change note below for 2.1.x), or **Claude Cowork** (macOS desktop app)
+- **Claude Code** 2.1.x or later (uses the `Stop` hook and the `SessionStart` `compact` matcher; see the 2.1.x note below), or **Claude Cowork** (macOS desktop app)
 - **Python 3.6+** (for hook and script execution)
 
 ---
@@ -55,7 +55,7 @@ The plugin will appear in your Cowork plugins list. Invoke with `/recall` during
 
 ### Claude Code: Option 1 - Pre-Built Marketplace (Recommended for VSCode)
 
-This is the recommended method: it always serves the latest release, and it is the only reliable method for the VSCode extension. (The community-marketplace listing `recall@claude-community` works too, but currently pins an older version until the refresh in review lands.)
+This is the recommended method: it always serves the latest release, and it is the only reliable method for the VSCode extension. (The community-marketplace listing `recall@claude-community` serves the same release.)
 
 ```bash
 claude plugin marketplace add https://github.com/bledden/claude-recall-marketplace
@@ -259,9 +259,9 @@ The plugin understands various time formats:
 
 ## Features
 
-### 1. /clear Survival
+### 1. Per-Turn Capture and /clear Survival
 
-Context is persisted to SQLite before `/clear` executes. After clearing, your full exchange history is still searchable and retrievable. Clearing the context window no longer means losing the record of what happened.
+Every completed turn is indexed by a `Stop` hook the moment Claude finishes responding (with a `UserPromptSubmit` pass as belt-and-braces and a final catch-up on `SessionEnd`), so the last thing said in a session is never lost. The whole reply is kept: all of Claude's text blocks between two prompts are merged into one exchange, not just the first "let me look" block. Context is persisted to SQLite before `/clear` executes, so clearing the window no longer means losing the record of what happened.
 
 ### 2. Cross-Session Search
 
@@ -272,9 +272,9 @@ Search across all sessions in a project with `--all`, or across every project yo
 /recall search "triton kernel" --global
 ```
 
-### 3. Compaction Nudge
+### 3. Post-Compaction Recovery
 
-When Claude Code compacts the conversation (via the `PreCompact` hook), the plugin automatically injects a brief context-recovery hint reminding Claude to re-anchor on what was happening. No manual `/recall` needed around compaction.
+When a session resumes after compaction (`SessionStart` with `matcher: "compact"`), the plugin injects a brief context-recovery note into Claude's context (`additionalContext`): how much of this session and project is indexed, recent topics, the last few exchange previews, and a reminder that `/recall` recovers the detail the summary dropped.
 
 ### 4. Auto-Tagging
 
@@ -357,7 +357,7 @@ Jan 6:
 
 ### 11. Full-Content Search
 
-Search looks in both user prompts and assistant responses, not just preview text. Multi-word queries use AND logic — both terms must appear anywhere in the exchange. Force exact phrase matching by quoting: `search "the fix is"`.
+Search looks in both user prompts and assistant responses, not just preview text. Multi-word queries use AND logic — both terms must appear anywhere in the exchange. Force exact phrase matching by quoting: `search "the fix is"`. Terms are stemmed (`kernel` matches `kernels`), and results are the **most recent** matches (shown in reading order).
 
 ```
 /recall search dimension
@@ -470,12 +470,13 @@ Navigation:
 
 ### Hooks
 
-Three hooks are registered:
+Five hook registrations:
 
 - **SessionStart** — Exports the session's env vars (a legacy fallback for resolving the current session/project; the native `CLAUDE_CODE_SESSION_ID` is preferred).
-- **UserPromptSubmit** — Incrementally indexes each exchange into SQLite on every prompt. Handles `/clear` survival by committing before the clear executes. Also runs connection checks (decay mode), auto-highlight detection, and the deterministic proactive-recall suggestion (all if enabled).
-- **PreCompact** — On compaction, injects a context-recovery nudge so Claude re-anchors on the session state.
-- **SessionEnd** — Finalizes the session record in the database.
+- **SessionStart (`matcher: "compact"`)** — After a compaction, injects a context-recovery note into Claude's context (`additionalContext`) so it re-anchors on the session state.
+- **UserPromptSubmit** — Indexes any completed turns not yet captured, runs connection checks (decay mode), auto-highlight detection, and the deterministic proactive-recall suggestion (all if enabled). Anything Claude must act on is returned as `additionalContext`; `systemMessage` is reserved for user-facing notices.
+- **Stop** — Indexes the turn that just completed. The transcript can lag the in-memory turn, so the trailing turn is consumed only once the payload's `last_assistant_message` has reached the file; otherwise it is held back for the next run.
+- **SessionEnd** — Final catch-up index, then finalizes the session record.
 
 ### Storage
 
@@ -506,7 +507,7 @@ The database contains six tables:
 - `connections` — opt-in links between sessions; stores `check_mode`, `check_interval`, `delivery_mode`, and `last_checked_at`
 - `invocations` (v2.2.3+) — one row per recall command invocation (timestamp, session, project hash, command, args); powers `/recall usage`
 
-FTS5 virtual tables index exchange content for fast keyword search across any scope.
+An FTS5 virtual table (porter stemming, schema v4) indexes exchange content for fast keyword search across any scope.
 
 ---
 
@@ -519,8 +520,8 @@ tail -20 ~/.claude/recall-events.log
 # Count recalls per day
 cut -dT -f1 ~/.claude/recall-events.log | uniq -c
 
-# Find sessions with frequent recalls
-grep -oP 'session=\K[^ ]+' ~/.claude/recall-events.log | sort | uniq -c | sort -rn
+# Find sessions with frequent recalls (portable: BSD/macOS sed too)
+sed -n 's/.*session=\([^ ]*\).*/\1/p' ~/.claude/recall-events.log | sort | uniq -c | sort -rn
 
 # Count total recalls
 wc -l ~/.claude/recall-events.log
@@ -533,18 +534,19 @@ wc -l ~/.claude/recall-events.log
 ```
 claude-recall-plugin/
 ├── .claude-plugin/
-│   └── plugin.json                  # Plugin metadata (v2.2.3)
+│   └── plugin.json                  # Plugin metadata (v2.3.0)
 ├── commands/
 │   └── recall.md                    # The /recall command definition
 ├── skills/
 │   └── recall-assistant/
 │       └── SKILL.md                 # Proactive recall assistant skill
 ├── hooks/
-│   ├── hooks.json                   # Hook config (SessionStart, UserPromptSubmit, PreCompact, SessionEnd)
+│   ├── hooks.json                   # Hook config (SessionStart, SessionStart:compact, UserPromptSubmit, Stop, SessionEnd)
 │   ├── session_start.py             # Exports session env vars (legacy fallback)
-│   ├── prompt_submit.py             # Incremental indexer + auto-tagging + proactive recall
-│   ├── post_compact.py              # Context recovery nudge (PreCompact)
-│   └── session_end.py               # Session finalization
+│   ├── prompt_submit.py             # Incremental indexer (shared) + auto-tagging + proactive recall
+│   ├── stop.py                      # Per-turn capture (Stop)
+│   ├── post_compact.py              # Post-compaction recovery note (SessionStart: compact)
+│   └── session_end.py               # Final catch-up index + session finalization
 ├── scripts/
 │   ├── db.py                        # SQLite layer (FTS5, WAL, all CRUD)
 │   ├── utils.py                     # Shared formatting and parsing utilities
@@ -555,7 +557,7 @@ claude-recall-plugin/
 │   ├── manage_sessions.py           # Session list, prune, export, stats
 │   ├── fetch_exchanges.py           # Fetch exchanges by query
 │   └── show_index.py                # Paginated index display
-├── tests/                          # 406 tests: unit + integration + skill evals
+├── tests/                          # 425 tests: unit + integration + skill evals
 │                                    #   + stress (scale/concurrent/clear/sharing)
 │                                    #   run with `python3 -m pytest -q` (see pytest.ini)
 ├── pytest.ini                      # Collects test_*.py AND stress_test_*.py
@@ -577,7 +579,7 @@ claude-recall-plugin/
 ```bash
 cd claude-recall-plugin
 
-# Full suite — unit, integration, and stress (406 tests)
+# Full suite — unit, integration, and stress (425 tests)
 # pytest.ini collects both test_*.py and stress_test_*.py
 python3 -m pytest -q
 ```
@@ -613,7 +615,8 @@ To report a security vulnerability, please open an issue at [github.com/bledden/
 - No dynamic code execution of any kind
 - No external network requests or downloads
 - Error messages do not leak file paths or internal state
-- Transcript reads are bounded (2MB / 1000 messages per hook invocation, v2.2.3+; progress banks across prompts so large transcripts converge)
+- Transcript reads are bounded (2MB / 1000 messages per hook invocation; progress banks across prompts so large transcripts converge) and a turn is only committed once it is complete
+- Stored text is capped: 1,000 chars per user prompt, 4,000 chars per assistant reply; tool calls, tool output and thinking are never stored
 - Database directory created with restricted permissions (0o700)
 - Hook stdin reads bounded to 1MB
 
@@ -634,7 +637,7 @@ To report a security vulnerability, please open an issue at [github.com/bledden/
 
 **Hooks don't seem to fire on Linux** — if your environment ships `python` but not `python3` on `PATH`, upgrade to **v2.2.2+** (hooks now probe for `python3` and fall back to `python`).
 
-**`/recall` shows an old or partial session** — on very large, actively-growing transcripts the indexer catches up incrementally over several prompts. **v2.2.3+** fixed a wedge/skip bug here; run a few prompts and it will converge. `/recall usage` (v2.2.3+) reports your invocation history.
+**`/recall` shows an old or partial session** — on very large, actively-growing transcripts the indexer catches up incrementally over several turns (2 MB per hook run); it converges. **v2.3+** captures each turn as it completes via the `Stop` hook, so the most recent exchange is normally already there. `/recall usage` reports your invocation history.
 
 ---
 
