@@ -17,7 +17,9 @@ from typing import List, Dict, Any, Optional, Tuple
 PREVIEW_LENGTH = 80
 MAX_CHARS_PER_MESSAGE = 1000      # user prompt cap
 MAX_ASSISTANT_CHARS = 4000        # assistant reply cap (all text blocks of the turn, merged)
-MAX_TOTAL_CHARS = 8000
+MAX_TOOL_CHARS = 2000             # compact record of the tool calls in a turn (commands, file paths)
+MAX_TOOL_LINE_CHARS = 300         # per tool call
+MAX_TOTAL_CHARS = 20000   # aggregate display budget per recall (~5k tokens)
 PAGE_SIZE = 20
 AROUND_TIME_WINDOW = 5
 
@@ -69,6 +71,53 @@ def resolve_project_hash(explicit: str = '') -> str:
             or compute_project_hash(os.getcwd()))
 
 
+# ---------------------------------------------------------------------------
+# Secrets redaction (applied at index time, before anything is stored)
+# ---------------------------------------------------------------------------
+
+_SECRET_PATTERNS = [
+    # (kind, compiled regex). Order matters: specific formats before the generic
+    # key=value catch-all so the kind label is informative.
+    ('private-key', re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----')),
+    ('aws-access-key', re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b')),
+    ('anthropic-key', re.compile(r'\bsk-ant-[A-Za-z0-9_-]{16,}')),
+    ('openai-key', re.compile(r'\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}')),
+    ('github-token', re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})')),
+    ('huggingface-token', re.compile(r'\bhf_[A-Za-z0-9]{20,}')),
+    ('slack-token', re.compile(r'\bxox[abprs]-[A-Za-z0-9-]{10,}')),
+    ('google-api-key', re.compile(r'\bAIza[0-9A-Za-z_-]{35}')),
+    ('bearer-token', re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}')),
+    ('jwt', re.compile(r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')),
+    # generic KEY=value / "key": "value" assignments whose NAME looks secret-ish
+    # (AWS_SECRET_ACCESS_KEY=…, "api_key": "…", DB_PASSWORD=…)
+    ('credential', re.compile(
+        r'(?i)([A-Za-z0-9_.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|pwd|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)'
+        r'(\s*["\']?\s*[:=]\s*["\']?)([A-Za-z0-9._~+/=-]{8,})')),
+    # natural language: "my password is hunter2-hunter2", "the api key was …"
+    ('credential', re.compile(
+        r'(?i)\b((?:api[ _-]?key|secret[ _-]?key|access[ _-]?key|password|passwd|passphrase|token)\s+(?:is|was|=|:)\s+["\']?)'
+        r'()([^\s"\']{8,})')),
+]
+
+
+def redact_secrets(text: str) -> str:
+    """Replace credential-looking substrings with ``[REDACTED:<kind>]``.
+
+    Pattern-based and deliberately conservative: it targets well-known token
+    formats (AWS, OpenAI/Anthropic, GitHub, Hugging Face, Slack, Google, JWTs,
+    bearer tokens, PEM private keys) and ``key=value`` assignments whose key
+    looks like a secret. It is not a guarantee; see PRIVACY.md.
+    """
+    if not text:
+        return text
+    for kind, rx in _SECRET_PATTERNS:
+        if kind == 'credential':
+            text = rx.sub(lambda m: m.group(1) + m.group(2) + f'[REDACTED:{kind}]', text)
+        else:
+            text = rx.sub(f'[REDACTED:{kind}]', text)
+    return text
+
+
 def extract_text_content(message: Dict[str, Any]) -> str:
     """Extract text content from a message object.
 
@@ -86,6 +135,56 @@ def extract_text_content(message: Dict[str, Any]) -> str:
             text_parts.append(item)
 
     return '\n'.join(text_parts)
+
+
+def extract_tool_calls(message: Dict[str, Any]) -> List[str]:
+    """Compact one-line records of the tool calls in an assistant message.
+
+    Recall's pitch is "the exact command from the real session", but commands
+    live in ``tool_use`` blocks, not in the assistant's prose. Each call becomes
+    one short line so it can be indexed and shown without storing tool output:
+
+        $ <shell command>            (Bash)
+        Edit <path> / Write <path> / Read <path> / NotebookEdit <path>
+        Grep <pattern> [in <path>] / Glob <pattern>
+        WebFetch <url> / Skill <name> [args] / Agent: <description>
+        <ToolName>                   (anything else)
+    """
+    content = message.get('content', [])
+    if not isinstance(content, list):
+        return []
+    lines: List[str] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get('type') != 'tool_use':
+            continue
+        name = str(item.get('name') or 'tool')
+        inp = item.get('input') or {}
+        if not isinstance(inp, dict):
+            inp = {}
+        if name == 'Bash':
+            cmd = ' '.join(str(inp.get('command', '')).split())
+            line = f'$ {cmd}' if cmd else '$'
+        elif name in ('Edit', 'Write', 'Read', 'NotebookEdit', 'MultiEdit'):
+            line = f"{name} {inp.get('file_path') or inp.get('path') or ''}".rstrip()
+        elif name == 'Grep':
+            line = f"Grep {inp.get('pattern', '')}" + (f" in {inp['path']}" if inp.get('path') else '')
+        elif name == 'Glob':
+            line = f"Glob {inp.get('pattern', '')}"
+        elif name == 'WebFetch':
+            line = f"WebFetch {inp.get('url', '')}"
+        elif name == 'WebSearch':
+            line = f"WebSearch {inp.get('query', '')}"
+        elif name == 'Skill':
+            line = f"Skill {inp.get('skill', '')} {inp.get('args', '')}".rstrip()
+        elif name in ('Agent', 'Task'):
+            line = f"{name}: {inp.get('description', '')}".rstrip(': ')
+        else:
+            line = name
+        line = line.strip()
+        if len(line) > MAX_TOOL_LINE_CHARS:
+            line = line[:MAX_TOOL_LINE_CHARS] + '…'
+        lines.append(line)
+    return lines
 
 
 def make_preview(text: str, max_length: int = PREVIEW_LENGTH) -> str:

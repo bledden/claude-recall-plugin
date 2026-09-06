@@ -45,6 +45,7 @@ from utils import (
     get_date_from_timestamp,
     search_in_text,
     MAX_CHARS_PER_MESSAGE,
+    MAX_ASSISTANT_CHARS,
     MAX_TOTAL_CHARS,
     AROUND_TIME_WINDOW,
 )
@@ -113,9 +114,10 @@ def format_exchanges(exchanges: List[Dict], query_type: str = "") -> str:
         user_text = ex.get('user_text', ex.get('preview', ''))
         assistant_text = ex.get('assistant_text', '')
 
-        # Truncate each message for display
+        # Display caps match the storage caps (user 1,000 / assistant 4,000);
+        # the old 1,000-char assistant display cap hid stored answers.
         user_text = truncate_text(user_text, MAX_CHARS_PER_MESSAGE)
-        assistant_text = truncate_text(assistant_text, MAX_CHARS_PER_MESSAGE)
+        assistant_text = truncate_text(assistant_text, MAX_ASSISTANT_CHARS)
 
         exchange_chars = len(user_text) + len(assistant_text)
         if total_chars + exchange_chars > MAX_TOTAL_CHARS:
@@ -126,10 +128,17 @@ def format_exchanges(exchanges: List[Dict], query_type: str = "") -> str:
 
         output.append(f"### Exchange #{idx}{time_str}")
         output.append("")
+        if ex.get('snippet'):
+            output.append(f"> Match: {' '.join(str(ex['snippet']).split())}")
+            output.append("")
         output.append(f"**User:**\n{user_text}")
         output.append("")
         if assistant_text:
             output.append(f"**Assistant:**\n{assistant_text}")
+            output.append("")
+        if ex.get('tool_text'):
+            output.append("**Tools run:**")
+            output.append(truncate_text(ex['tool_text'], 600))
             output.append("")
         output.append("---")
         output.append("")
@@ -179,6 +188,9 @@ def format_cross_project_results(exchanges: List[Dict], keyword: str) -> str:
                 user_text = truncate_text(ex.get('user_text', ex.get('preview', '')), 200)
                 assistant_text = truncate_text(ex.get('assistant_text', ''), 200)
                 lines.append(f"  (exchange #{idx}) [{time}]")
+                if ex.get('snippet'):
+                    # The passage that actually matched, not the first 200 chars.
+                    lines.append(f"  Match: \"{' '.join(str(ex['snippet']).split())}\"")
                 lines.append(f"  User: \"{user_text}\"")
                 if assistant_text:
                     lines.append(f"  Assistant: \"{assistant_text}\"")
@@ -215,6 +227,8 @@ def _build_arg_parser():
                              help='Search sessions whose project path contains NAME.')
     parser.add_argument('--tag', metavar='TAG',
                         help='Filter/search by tag name (delegates to manage_tags).')
+    parser.add_argument('--half-life', dest='half_life', type=float, default=30.0, metavar='DAYS',
+                        help='Recency half-life for ranking search hits (default 30; 0 = pure relevance).')
     parser.add_argument('command', nargs='?', default='last5',
                         help='Command: last5, last10, around, search')
     parser.add_argument('rest', nargs='*',
@@ -302,7 +316,7 @@ def main():
 
             # --global: search across all projects
             if args.scope_global:
-                results = search_exchanges_global(conn, keyword, limit=20)
+                results = search_exchanges_global(conn, keyword, limit=20, half_life_days=args.half_life)
                 if not results:
                     print(f"*No exchanges found matching '{keyword}' across all projects.*")
                     return
@@ -318,7 +332,8 @@ def main():
                     return
                 all_results = []
                 for s in sessions:
-                    hits = search_exchanges_fts(conn, keyword, session_id=s['session_id'], limit=10)
+                    hits = search_exchanges_fts(conn, keyword, session_id=s['session_id'], limit=10,
+                                               half_life_days=args.half_life)
                     for h in hits:
                         h['project_path'] = s['project_path']
                     all_results.extend(hits)
@@ -343,12 +358,12 @@ def main():
                 if not project_hash:
                     print("*--all: could not resolve a project hash.*")
                     return
-                results = search_exchanges_fts(conn, keyword, project_hash=project_hash, limit=20)
-                results.reverse()  # newest-20 from the DB, shown oldest→newest for reading
+                results = search_exchanges_fts(conn, keyword, project_hash=project_hash, limit=20,
+                                               half_life_days=args.half_life)
                 if not results:
                     print(f"*No exchanges found matching '{keyword}' in this project.*")
                     return
-                print(f"*Search for '{keyword}' across project ({len(results)} match(es)):*\n")
+                print(f"*Search for '{keyword}' across project ({len(results)} match(es), best match first):*\n")
                 print(format_exchanges(results, f"search '{keyword}' --all"))
                 return
 
@@ -357,8 +372,8 @@ def main():
                 print("*No session ID provided. Use --session <id> or set RECALL_SESSION_ID.*")
                 return
 
-            results = search_exchanges_fts(conn, keyword, session_id=session_id, limit=10)
-            results.reverse()  # newest-10 from the DB, shown oldest→newest for reading
+            results = search_exchanges_fts(conn, keyword, session_id=session_id, limit=10,
+                                           half_life_days=args.half_life)
             if not results:
                 print(f"*No exchanges found matching '{keyword}'*")
                 print("*Search looks in both user prompts AND assistant responses.*")
@@ -366,7 +381,7 @@ def main():
 
             # NB: search_exchanges_fts already caps at limit=10, so no further
             # trimming is needed here.
-            print(f"*Fetched {len(results)} exchange(s) (search '{keyword}'):*\n")
+            print(f"*Fetched {len(results)} exchange(s) (search '{keyword}', best match first):*\n")
             print(format_exchanges(results, f"search '{keyword}'"))
             return
 

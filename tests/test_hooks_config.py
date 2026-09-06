@@ -43,8 +43,16 @@ class TestHooksConfig(unittest.TestCase):
         for event, entries in self.hooks.items():
             for entry in entries:
                 for h in entry['hooks']:
-                    script = h['command'].split('${CLAUDE_PLUGIN_ROOT}/')[-1]
+                    script = h['command'].split('${CLAUDE_PLUGIN_ROOT}/')[-1].strip('\"\' ')
                     self.assertTrue((ROOT / script).exists(), f"{event}: {script} missing")
+
+    def test_hook_paths_are_quoted(self):
+        """Plugin roots can contain spaces; the interpreter and script must be quoted."""
+        for event, entries in self.hooks.items():
+            for entry in entries:
+                for h in entry['hooks']:
+                    self.assertIn('"$PY" "${CLAUDE_PLUGIN_ROOT}/', h['command'], f"{event}: {h['command']}")
+                    self.assertTrue(h['command'].endswith('.py"'), f"{event}: unclosed quote: {h['command']}")
 
     def test_hook_commands_have_python_fallback(self):
         """Hooks must not hard-code bare `python3` — on Linux boxes where

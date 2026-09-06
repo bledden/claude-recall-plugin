@@ -1,4 +1,4 @@
-# Claude Recall Plugin v2.3.1
+# Claude Recall Plugin v2.4.0
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that persists conversation context across sessions, `/clear` commands, and compaction events. It adds cross-session search, tagging, highlight sharing between sessions, and observability.
 
@@ -15,6 +15,7 @@ Claude Code ships with `/recap`, `/resume`, and a `memory/` directory. Recall is
 - **Cross-project full-text search (FTS5).** Native `/recap` and `/resume` operate within the current session/project. Recall indexes every exchange into SQLite FTS5 and searches across **all** sessions in a project (`--all`) or across **every** project (`--global`) — including past, closed sessions.
 - **Tagging.** Apply manual tags to sessions or individual exchanges, plus automatic keyword extraction, then query them across projects (`/recall tag`, `/recall tags`, `/recall search --tag`). The native `memory/` directory is freeform notes, not a queryable tag index.
 - **Highlight & connection sharing between parallel sessions.** Link two live sessions and share findings as lightweight highlights delivered to a connected session's inbox (`/recall connect`, `/recall highlight`, `/recall inbox`). Native Claude Code has no mechanism to push a finding from one session to another.
+- **The exact commands Claude ran.** Tool calls (shell commands, files edited, URLs fetched) are indexed alongside the prose, so "how did we spin up that pod" returns the real command line from the real session, not a reconstruction.
 
 If you only need to re-anchor within the current session, native `/recap` / `/resume` may be enough. Recall is for cross-session, cross-project retrieval, tagging, and sharing.
 
@@ -187,6 +188,7 @@ This will:
 /recall search <keyword> --all              Search all sessions, current project
 /recall search <keyword> --global           Search across ALL projects
 /recall search <keyword> --project <name>   Search a specific project by name
+/recall search <keyword> --half-life 0      Rank by relevance only (default: 30-day recency half-life)
 ```
 
 ### Session Management
@@ -357,7 +359,13 @@ Jan 6:
 
 ### 11. Full-Content Search
 
-Search looks in both user prompts and assistant responses, not just preview text. Multi-word queries use AND logic — both terms must appear anywhere in the exchange. Force exact phrase matching by quoting: `search "the fix is"`. Terms are stemmed (`kernel` matches `kernels`), and results are the **most recent** matches (shown in reading order).
+Search looks in user prompts, assistant responses and the tool calls of each exchange. Multi-word queries use AND logic — both terms must appear anywhere in the exchange. Force exact phrase matching by quoting: `search "the fix is"`. Terms are stemmed (`kernel` matches `kernels`). Results are **ranked**: BM25 relevance re-weighted by recency (a hit 30 days old keeps half its weight; `--half-life 0` for pure relevance), best match first, and every hit shows the passage that matched:
+
+```
+### Exchange #162 [Sep 5 6:41 pm]
+
+> Match: $ cd ~/Documents/claude-recall-plugin «gh» «pr» ready 2 …
+```
 
 ```
 /recall search dimension
@@ -379,7 +387,19 @@ Log format:
 2026-01-05T16:45:00+00:00 | session=abc123 | exchanges=72 | CONTEXT_RECALL_TRIGGERED
 ```
 
-### 13. Pagination
+### 13. Tool-Call Capture
+
+Every tool call Claude makes in a turn is stored as one compact line — `$ ssh root@ssh.runpod.io -p 22222`, `Edit /p/kernel.py`, `Grep BLOCK_S in /p`, `WebFetch https://…` — under the exchange's **Tools run**, and it is searchable. Tool *output* is never stored, so the store stays small (a 20 MB transcript indexes to well under 1 MB of tool lines).
+
+### 14. Secrets Redaction
+
+Credential-looking strings are replaced with `[REDACTED:<kind>]` before storage: well-known token formats, `KEY=value` assignments with secret-like names, and phrasings like "my password is …". Pattern-based, not a guarantee — see [PRIVACY.md](PRIVACY.md).
+
+### 15. Claude Invokes Recall on Its Own
+
+`/recall:recall` is a skill whose description carries trigger phrases ("didn't we already", "what was that command", "earlier you said", "last time", …). When the user refers to earlier work, Claude invokes it without being asked, runs the most specific search directly (no menu), and quotes what it recovered. The separate, opt-in `recall-assistant` skill adds behavioural/temporal detection and cross-session suggestions.
+
+### 16. Pagination
 
 Long sessions are paginated (20 exchanges per page):
 
@@ -475,8 +495,8 @@ Five hook registrations:
 - **SessionStart** — Exports the session's env vars (a legacy fallback for resolving the current session/project; the native `CLAUDE_CODE_SESSION_ID` is preferred).
 - **SessionStart (`matcher: "compact"`)** — After a compaction, injects a context-recovery note into Claude's context (`additionalContext`) so it re-anchors on the session state.
 - **UserPromptSubmit** — Indexes any completed turns not yet captured, runs connection checks (decay mode), auto-highlight detection, and the deterministic proactive-recall suggestion (all if enabled). Anything Claude must act on is returned as `additionalContext`; `systemMessage` is reserved for user-facing notices.
-- **Stop** — Indexes the turn that just completed. The transcript can lag the in-memory turn, so the trailing turn is consumed only once the payload's `last_assistant_message` has reached the file; otherwise it is held back for the next run.
-- **SessionEnd** — Final catch-up index, then finalizes the session record.
+- **Stop** — Indexes the turn that just completed. The transcript can lag the in-memory turn; whatever is on disk is stored now and any assistant blocks that land later are appended to the same exchange (FTS kept in sync), so nothing is orphaned.
+- **SessionEnd** — Drains the remaining backlog in committed passes (7s budget), then finalizes the session record.
 
 ### Storage
 
@@ -501,13 +521,13 @@ Highlights are created via two paths: explicit (Claude runs `/recall highlight`)
 
 The database contains six tables:
 - `sessions` — one row per session, with project, timestamps, and metadata (including per-session config like `auto_highlight`)
-- `exchanges` — one row per exchange, with full user/assistant text
+- `exchanges` — one row per exchange: user text, merged assistant text, and `tool_text` (one line per tool call)
 - `tags` — session and exchange-level tags
 - `highlights` — findings flagged for sharing, linked to a session and exchange; `source` field distinguishes explicit vs auto-detected
 - `connections` — opt-in links between sessions; stores `check_mode`, `check_interval`, `delivery_mode`, and `last_checked_at`
 - `invocations` (v2.2.3+) — one row per recall command invocation (timestamp, session, project hash, command, args); powers `/recall usage`
 
-An FTS5 virtual table (porter stemming, schema v4) indexes exchange content for fast keyword search across any scope.
+An FTS5 virtual table (porter stemming, schema v5) indexes prompts, replies, previews and tool calls; searches rank by BM25 × recency and return match snippets.
 
 ---
 
@@ -534,22 +554,22 @@ wc -l ~/.claude/recall-events.log
 ```
 claude-recall-plugin/
 ├── .claude-plugin/
-│   └── plugin.json                  # Plugin metadata (v2.3.1)
-├── commands/
-│   └── recall.md                    # The /recall command definition
+│   └── plugin.json                  # Plugin metadata (v2.4.0)
 ├── skills/
+│   ├── recall/
+│   │   └── SKILL.md                 # The /recall:recall skill (Claude can invoke it on its own)
 │   └── recall-assistant/
-│       └── SKILL.md                 # Proactive recall assistant skill
+│       └── SKILL.md                 # Opt-in proactive assistant skill
 ├── hooks/
 │   ├── hooks.json                   # Hook config (SessionStart, SessionStart:compact, UserPromptSubmit, Stop, SessionEnd)
 │   ├── session_start.py             # Exports session env vars (legacy fallback)
-│   ├── prompt_submit.py             # Incremental indexer (shared) + auto-tagging + proactive recall
+│   ├── prompt_submit.py             # Incremental indexer (shared; continuation-append) + auto-tagging + proactive recall
 │   ├── stop.py                      # Per-turn capture (Stop)
 │   ├── post_compact.py              # Post-compaction recovery note (SessionStart: compact)
 │   └── session_end.py               # Final catch-up index + session finalization
 ├── scripts/
 │   ├── db.py                        # SQLite layer (FTS5, WAL, all CRUD)
-│   ├── utils.py                     # Shared formatting and parsing utilities
+│   ├── utils.py                     # Shared utilities: session/project resolution, redaction, tool-call extraction, time parsing
 │   ├── auto_tagger.py               # TF-based keyword extraction
 │   ├── highlight.py                 # Highlight creation (explicit + auto-detect)
 │   ├── manage_connections.py        # Connect, disconnect, inbox, config
@@ -557,7 +577,7 @@ claude-recall-plugin/
 │   ├── manage_sessions.py           # Session list, prune, export, stats
 │   ├── fetch_exchanges.py           # Fetch exchanges by query
 │   └── show_index.py                # Paginated index display
-├── tests/                          # 425 tests: unit + integration + skill evals
+├── tests/                          # 459 tests: unit + integration + skill evals + external-review regressions
 │                                    #   + stress (scale/concurrent/clear/sharing)
 │                                    #   run with `python3 -m pytest -q` (see pytest.ini)
 ├── pytest.ini                      # Collects test_*.py AND stress_test_*.py
@@ -579,7 +599,7 @@ claude-recall-plugin/
 ```bash
 cd claude-recall-plugin
 
-# Full suite — unit, integration, and stress (425 tests)
+# Full suite — unit, integration, and stress (459 tests)
 # pytest.ini collects both test_*.py and stress_test_*.py
 python3 -m pytest -q
 ```
@@ -616,7 +636,9 @@ To report a security vulnerability, please open an issue at [github.com/bledden/
 - No external network requests or downloads
 - Error messages do not leak file paths or internal state
 - Transcript reads are bounded (2MB / 1000 messages per hook invocation; progress banks across prompts so large transcripts converge) and a turn is only committed once it is complete
-- Stored text is capped: 1,000 chars per user prompt, 4,000 chars per assistant reply; tool calls, tool output and thinking are never stored
+- Stored text is capped: 1,000 chars per user prompt, 4,000 chars per assistant reply, 2,000 chars of tool-call lines; tool output and thinking are never stored
+- Credential-looking strings are redacted before storage (see PRIVACY.md)
+- Hook commands quote the interpreter and script path (plugin roots with spaces work)
 - Database directory created with restricted permissions (0o700)
 - Hook stdin reads bounded to 1MB
 
@@ -637,7 +659,7 @@ To report a security vulnerability, please open an issue at [github.com/bledden/
 
 **Hooks don't seem to fire on Linux** — if your environment ships `python` but not `python3` on `PATH`, upgrade to **v2.2.2+** (hooks now probe for `python3` and fall back to `python`).
 
-**`/recall` shows an old or partial session** — on very large, actively-growing transcripts the indexer catches up incrementally over several turns (2 MB per hook run); it converges. **v2.3+** captures each turn as it completes via the `Stop` hook, so the most recent exchange is normally already there. `/recall usage` reports your invocation history.
+**`/recall` shows an old or partial session** — on very large, actively-growing transcripts the indexer catches up incrementally over several turns (2 MB per hook run) and always makes progress, even on a single multi-MB record; `SessionEnd` drains whatever is left. **v2.3+** captures each turn as it completes via the `Stop` hook, so the most recent exchange is normally already there. `/recall usage` reports your invocation history.
 
 ---
 

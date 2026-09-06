@@ -659,17 +659,20 @@ class TestSearchOrderingAndStemming(unittest.TestCase):
             "SELECT sql FROM sqlite_master WHERE name='exchanges_fts'").fetchone()[0]
         self.assertIn('porter', sql)
 
-    def test_v3_store_is_rebuilt_to_v4(self):
-        """A pre-v4 store (no stemming) is migrated: FTS recreated + rebuilt."""
+    def test_v3_store_is_rebuilt_to_current(self):
+        """A pre-v4 store (no stemming, no tool_text) is migrated: column added, FTS recreated + rebuilt."""
         self.conn.executescript(
             "DROP TABLE exchanges_fts;"
+            "ALTER TABLE exchanges DROP COLUMN tool_text;"
             "CREATE VIRTUAL TABLE exchanges_fts USING fts5("
             "  user_text, assistant_text, preview, content=exchanges, content_rowid=id);"
             "INSERT INTO exchanges_fts(exchanges_fts) VALUES('rebuild');"
             "PRAGMA user_version = 3;")
         self.conn.commit(); self.conn.close()
         self.conn = get_connection(self.db_path)
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 4)
+        from db import SCHEMA_VERSION
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+        self.assertIn('tool_text', [r[1] for r in self.conn.execute('PRAGMA table_info(exchanges)')])
         sql = self.conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='exchanges_fts'").fetchone()[0]
         self.assertIn('porter', sql)

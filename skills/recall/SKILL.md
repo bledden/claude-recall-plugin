@@ -1,5 +1,7 @@
 ---
-description: Recover context from recent conversation
+name: recall
+description: Recover past conversation context from this session, this project, or every project on this machine. Search verbatim exchanges and the exact commands Claude ran, jump to a time ("around 2pm"), browse earlier sessions, tag, prune, export, or share findings between sessions. Use when the user refers to earlier work, a previous session, something "we discussed", a command run before, a decision or term from a past conversation, or when context was lost after compaction.
+when_to_use: Trigger phrases - "didn't we already", "what was that command", "how did we set up", "remind me", "earlier you said", "last time", "in the other project", "what did we decide", "catch me up on Tuesday", or any question whose answer plausibly lives in a past session rather than the current one.
 argument-hint: "[lastN | around TIME | search KEYWORD [--all|--global|--project NAME|--tag NAME] | sessions [--all|--project NAME] | session ID ARGS | tag NAME | tags | stats | highlight | connect | disconnect | inbox | config | prune | export | ... (see full list below)]"
 allowed-tools: Bash(python3:*), Bash(python:*), AskUserQuestion
 ---
@@ -8,7 +10,21 @@ allowed-tools: Bash(python3:*), Bash(python:*), AskUserQuestion
 
 The user wants to recover context from this conversation.
 
+## If you invoked this skill yourself (no `$ARGUMENTS`)
+
+You reached for recall because the user referred to something from earlier. Do **not** show the menu. Run the most specific query directly and read the results before answering:
+
+- Something from this project's history: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py search <2-4 keywords> --all`
+- Another project, or unsure which: add `--global` instead of `--all`
+- A command Claude ran before ("how did we spin up the pod"): search the distinctive token (`ssh`, `runpod`, the binary name); tool calls are indexed too
+- A time reference ("this morning", "Tuesday 2pm"): `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_exchanges.py around "<time>"`
+- Nothing found: widen (`--global`, fewer/different keywords, `--half-life 0` for old material) before telling the user it isn't there.
+
+Results are ranked best-match first (BM25 relevance re-weighted by recency) and each hit shows the matching passage. Quote the recovered exchange, name when it happened, then answer.
+
 ## Step 1: Check for Quick Commands
+
+> The commands below say `python3`; if your environment only has `python`, substitute it (both are pre-approved in `allowed-tools`).
 
 **FIRST**, check if `$ARGUMENTS` contains a quick command and run it directly, then stop:
 

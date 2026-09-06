@@ -544,14 +544,18 @@ class TestIncompleteTailHeldBack(unittest.TestCase):
         self.assertEqual([e['user_text'] for e in ex], ['Q1', 'Q2'])
         self.assertEqual(ex[1]['assistant_text'], 'A2')
 
-    def test_size_cap_mid_turn_holds_back_partial_turn(self):
+    def test_size_cap_mid_turn_stores_partial_then_appends(self):
+        """A turn split across reads is stored immediately and completed by
+        appending the later blocks — never orphaned, never wedged."""
         _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'part one', 't2'),
                 _entry('assistant', 'part two', 't3'), _entry('assistant', 'part three', 't4'))
         prev = _ps.MAX_MESSAGES_PER_READ
         _ps.MAX_MESSAGES_PER_READ = 2   # read stops after Q1 + 'part one' (not EOF)
         try:
             self._run()
-            self.assertEqual(self._exchanges(), [], "a partial turn must not be stored")
+            ex = self._exchanges()
+            self.assertEqual(len(ex), 1)
+            self.assertEqual(ex[0]['assistant_text'], 'part one')   # partial, stored now
         finally:
             _ps.MAX_MESSAGES_PER_READ = prev
         self._run()
@@ -559,6 +563,21 @@ class TestIncompleteTailHeldBack(unittest.TestCase):
         self.assertEqual(len(ex), 1)
         for part in ('part one', 'part two', 'part three'):
             self.assertIn(part, ex[0]['assistant_text'])
+
+    def test_cap_right_after_prompt_stores_pending_exchange(self):
+        """Cap hit before any reply text: the prompt is stored with an empty
+        reply (progress guaranteed) and the reply appends on the next run."""
+        _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'A1', 't2'))
+        prev = _ps.MAX_MESSAGES_PER_READ
+        _ps.MAX_MESSAGES_PER_READ = 1
+        try:
+            self._run()
+            ex = self._exchanges()
+            self.assertEqual([(e['user_text'], e['assistant_text']) for e in ex], [('Q1', '')])
+        finally:
+            _ps.MAX_MESSAGES_PER_READ = prev
+        self._run()
+        self.assertEqual(self._exchanges()[0]['assistant_text'], 'A1')
 
 
 class TestRollingAutoTags(unittest.TestCase):

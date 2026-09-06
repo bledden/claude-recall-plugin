@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-09-05
+
+Parity release, driven by an independent review of v2.3.1 (GPT 6 Astra, eight findings, all fixed; its ten reproducers are now `tests/test_review_regressions.py`) and by the gap to funes.
+
+### Added
+- **The commands Claude ran are recallable.** Tool calls in a turn are captured as one compact line each (`$ <shell command>`, `Edit <path>`, `Grep <pattern>`, `WebFetch <url>`, …) into a new `exchanges.tool_text` column, indexed by FTS and shown under "Tools run". Tool *output* is still never stored. On a real 20 MB transcript: 141 of 163 exchanges carry tool calls, 327 shell commands.
+- **Ranked search with match snippets.** Results are BM25 relevance re-weighted by recency (30-day half-life; `--half-life 0` for pure relevance), best match first, and every hit carries the passage that matched (`Match: …«term»…`) instead of the first 200 characters.
+- **Secrets redacted at index time.** Well-known credential formats (AWS, OpenAI/Anthropic, GitHub, Hugging Face, Slack, Google, JWTs, bearer tokens, PEM private keys), `KEY=value` assignments with secret-like names, and "my password is …" phrasings are replaced with `[REDACTED:<kind>]` before storage. Pattern-based, documented as not exhaustive (PRIVACY.md).
+- **Claude reaches for recall on its own.** `/recall:recall` is now a skill (`skills/recall/SKILL.md`) with a trigger-phrase description, so Claude invokes it when the user refers to earlier work; a section tells it to search directly instead of showing the menu.
+- **Continuation-append indexer.** Assistant blocks that land after their exchange was stored (a turn split across reads, a Stop-time transcript lag, a blocked-Stop continuation) are appended to that exchange, FTS kept in sync. Replaces the v2.3 hold-back rule and the `last_assistant_message` check.
+- `SessionEnd` drains the whole backlog in committed passes within a 7s budget.
+
+### Fixed
+- Retrieval hid stored answers after 1,000 characters (display used the user-side cap). Display caps now match storage (4,000) and the aggregate budget is 20,000.
+- Capture could wedge forever on a turn larger than the 2 MB read budget, and on any single record larger than the budget. Every read now makes progress: at least one record is always consumed, and a prompt cut off by the cap is stored pending its reply.
+- A partially written JSONL record could be skipped permanently (offset advanced past it). Unterminated, unparseable final records are no longer consumed.
+- A proactive `[Recall]` suggestion discarded a due cross-session highlight in the same prompt; the `/recall` observability notice did the same. Outputs are now combined.
+- Global search lacked the `idx` tiebreaker; ranking now ties on timestamp then idx.
+- PRIVACY.md claimed credentials were never stored; they now are redacted, and the policy says exactly what that means.
+- Hook commands left the plugin path unquoted (broken under paths with spaces).
+
+### Changed
+- DB schema version 5 (`tool_text` column; FTS index rebuilt once).
+- `commands/recall.md` removed in favour of the skill.
+- 459 tests.
+
 ## [2.3.1] - 2026-09-05
 
 ### Fixed

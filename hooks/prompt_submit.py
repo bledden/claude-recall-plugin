@@ -21,10 +21,12 @@ from typing import List, Dict, Any, Tuple, Optional
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from utils import (extract_text_content, make_preview, truncate_text,
-                   compute_project_hash, MAX_CHARS_PER_MESSAGE, MAX_ASSISTANT_CHARS)
+from utils import (extract_text_content, extract_tool_calls, make_preview,
+                   truncate_text, redact_secrets, compute_project_hash,
+                   MAX_CHARS_PER_MESSAGE, MAX_ASSISTANT_CHARS, MAX_TOOL_CHARS)
 from db import (get_connection, insert_session, get_session, insert_exchanges,
                 update_session_offset, get_exchanges, insert_tag, DB_PATH,
+                get_last_exchange, update_exchange_text,
                 get_connections, get_highlights, update_connection_check,
                 get_exchange_count, get_session_config)
 from auto_tagger import compute_auto_tags
@@ -92,16 +94,22 @@ def parse_transcript_from_offset(
 ) -> Tuple[List[Dict], int]:
     """Parse transcript JSONL starting from a byte offset.
 
-    Opens the file, seeks to *byte_offset*, and reads every subsequent
-    JSONL line that contains a user or assistant message.
+    Opens the file, seeks to *byte_offset*, and reads every subsequent JSONL
+    line that contains a user or assistant message (text or tool calls).
 
-    Args:
-        transcript_path: Path to the JSONL transcript file.
-        byte_offset: Position to seek to before reading.
+    Three rules keep the durable offset honest:
+      * the size/message caps stop the read BEFORE a line that would exceed
+        them, but at least one line is always consumed, so a single oversized
+        record (a multi-MB tool result) can never block the offset forever;
+      * a final line with no trailing newline that does not parse is the
+        writer mid-record — it is NOT consumed, so the next run re-reads it
+        whole instead of resuming inside the JSON;
+      * every message records its byte span (``_start``/``_end``) so the
+        indexer can rewind to a held-back prompt exactly.
 
     Returns:
         Tuple of (messages, new_byte_offset) where each message is a dict
-        with keys: role, text, timestamp.
+        with keys: role, text, tools, timestamp, _start, _end.
     """
     messages: List[Dict] = []
     new_offset = byte_offset
@@ -116,49 +124,47 @@ def parse_transcript_from_offset(
 
             consumed = 0
             for line_bytes in f:
-                # Stop BEFORE consuming a line that would exceed the caps, so it
-                # is re-read next time rather than skipped (the old code broke
-                # AFTER consuming, then used a buffered f.tell() that lost the
-                # unread tail). Advance the durable offset only past lines we
-                # actually consumed, so a timeout still banks progress.
-                if (consumed + len(line_bytes) > MAX_BYTES_PER_READ
-                        or len(messages) >= MAX_MESSAGES_PER_READ):
+                if consumed > 0 and (consumed + len(line_bytes) > MAX_BYTES_PER_READ
+                                     or len(messages) >= MAX_MESSAGES_PER_READ):
                     break
+
                 line_start = byte_offset + consumed
-                consumed += len(line_bytes)
-                new_offset = byte_offset + consumed
+                terminated = line_bytes.endswith(b'\n')
+                entry = None
                 try:
                     line = line_bytes.decode('utf-8').strip()
-                except UnicodeDecodeError:
+                    if line:
+                        entry = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    if not terminated:
+                        break          # partial record still being written
+                    entry = None       # a corrupt, complete line: skip it
+
+                consumed += len(line_bytes)
+                new_offset = byte_offset + consumed
+
+                if not isinstance(entry, dict):
+                    continue
+                role = entry.get('type', '') or entry.get('role', '')
+                if role not in ('user', 'assistant'):
+                    role = (entry.get('message') or {}).get('role', '')
+                if role not in ('user', 'assistant'):
                     continue
 
-                if not line:
-                    continue
-
-                try:
-                    entry = json.loads(line)
-                    role = entry.get('type', '') or entry.get('role', '')
-                    if role not in ('user', 'assistant'):
-                        message_obj = entry.get('message', {})
-                        role = message_obj.get('role', '')
-
-                    if role in ('user', 'assistant'):
-                        message_obj = entry.get('message', {})
-                        text = extract_text_content(message_obj)
-                        timestamp = entry.get('timestamp', '')
-
-                        if text:
-                            messages.append({
-                                'role': role,
-                                'text': text,
-                                'timestamp': timestamp,
-                                # byte span of this line: lets the indexer resume
-                                # exactly at a held-back (incomplete) turn
-                                '_start': line_start,
-                                '_end': new_offset,
-                            })
-                except json.JSONDecodeError:
-                    continue
+                message_obj = entry.get('message') or {}
+                text = extract_text_content(message_obj)
+                tools = extract_tool_calls(message_obj) if role == 'assistant' else []
+                # Keep tool-only assistant messages too: the commands Claude
+                # ran are exactly what users come back for.
+                if text or tools:
+                    messages.append({
+                        'role': role,
+                        'text': text,
+                        'tools': tools,
+                        'timestamp': entry.get('timestamp', ''),
+                        '_start': line_start,
+                        '_end': new_offset,
+                    })
 
     except Exception as e:
         print(f"[context-recall] Transcript parse error: {e}", file=sys.stderr)
@@ -173,6 +179,7 @@ def parse_transcript_from_offset(
 def build_new_exchanges(
     messages: List[Dict],
     start_idx: int = 1,
+    allow_pending: bool = False,
 ) -> List[Dict]:
     """Pair each user message with ALL the assistant text that follows it.
 
@@ -181,18 +188,18 @@ def build_new_exchanges(
     actual answer). Pairing a user message with only the *next* assistant
     message kept the preamble and dropped the answer — 71% of assistant text on
     a real transcript. Every assistant message up to the next user message is
-    now merged (blank-line separated) into one ``assistant_text``.
+    merged (blank-line separated) into ``assistant_text``; its tool calls
+    become ``tool_text`` (one line each). Secrets are redacted before storage.
 
-    Each exchange dict has: idx, preview, timestamp, user_text, assistant_text.
-    A user message with no assistant reply is skipped; assistant messages that
-    precede any user message are skipped.
+    A user message with no assistant reply is skipped, unless
+    ``allow_pending`` is set and it is the LAST message: then it is stored
+    with an empty reply so later assistant blocks can be appended to it (the
+    indexer uses this when a read stopped at the size cap right after the
+    prompt). Assistant messages before any user message are skipped here; the
+    indexer appends those to the previous exchange instead.
 
-    Args:
-        messages: List of message dicts with role, text, timestamp.
-        start_idx: Starting exchange index number.
-
-    Returns:
-        List of exchange dicts.
+    Each exchange dict has: idx, preview, timestamp, user_text,
+    assistant_text, tool_text (None when no tools ran).
     """
     exchanges: List[Dict] = []
     exchange_idx = start_idx
@@ -206,17 +213,25 @@ def build_new_exchanges(
         user_msg = messages[i]
         j = i + 1
         parts: List[str] = []
+        tool_lines: List[str] = []
         while j < n and messages[j]['role'] == 'assistant':
             if messages[j]['text']:
                 parts.append(messages[j]['text'])
+            tool_lines.extend(messages[j].get('tools') or [])
             j += 1
-        if parts:
+        pending = allow_pending and j >= n and not parts and not tool_lines
+        if parts or tool_lines or pending:
+            # Redact credential-looking strings BEFORE anything is stored.
+            user_text = redact_secrets(user_msg['text'])
+            assistant_text = redact_secrets('\n\n'.join(parts))
+            tool_text = redact_secrets('\n'.join(tool_lines))
             exchanges.append({
                 'idx': exchange_idx,
-                'preview': make_preview(user_msg['text']),
+                'preview': make_preview(user_text),
                 'timestamp': user_msg.get('timestamp', ''),
-                'user_text': truncate_text(user_msg['text'], MAX_CHARS_PER_MESSAGE),
-                'assistant_text': truncate_text('\n\n'.join(parts), MAX_ASSISTANT_CHARS),
+                'user_text': truncate_text(user_text, MAX_CHARS_PER_MESSAGE),
+                'assistant_text': truncate_text(assistant_text, MAX_ASSISTANT_CHARS),
+                'tool_text': truncate_text(tool_text, MAX_TOOL_CHARS) if tool_text else None,
             })
             exchange_idx += 1
             i = j
@@ -444,72 +459,56 @@ def _hook_context(message: str, event: str = 'UserPromptSubmit') -> Dict:
                                    "additionalContext": message}}
 
 
-def _trim_incomplete_tail(messages: List[Dict], final: bool):
-    """Hold back the last turn unless it is provably complete.
+def _append_continuation(conn, session_id: str, leading: List[Dict]) -> bool:
+    """Append assistant messages that arrived AFTER their exchange was stored.
 
-    Returns ``(messages_to_index, resume_offset)``. ``resume_offset`` is the
-    byte position of the held-back user message (so the next run re-reads it),
-    or None when nothing is held back.
-
-    Rules:
-      * a trailing user message with no assistant reply is never consumed
-        (it pairs up on a later run; consuming it would orphan the reply);
-      * a trailing user+assistant group is consumed only when ``final`` is
-        True — i.e. the caller knows the turn is over and the transcript is
-        fully flushed. Otherwise a partial reply would be stored and the rest
-        of the turn's blocks orphaned on the next read.
+    Happens whenever a turn spans hook runs: a read stopped at the size cap
+    mid-turn, the transcript lagged at Stop time, or another Stop hook blocked
+    and Claude continued without a new prompt. The blocks are merged into the
+    session's last exchange (text and tool calls), and the FTS entry is
+    refreshed. Returns True if anything was appended.
     """
-    if not messages:
-        return messages, None
-    last_user = -1
-    for i, m in enumerate(messages):
-        if m['role'] == 'user':
-            last_user = i
-    if last_user == -1:
-        return messages, None
-    has_reply = any(m['role'] == 'assistant' for m in messages[last_user + 1:])
-    if has_reply and final:
-        return messages, None
-    return messages[:last_user], messages[last_user].get('_start')
-
-
-def _turn_is_flushed(messages: List[Dict], last_assistant_message: str) -> bool:
-    """At Stop time the transcript file may lag the in-memory turn. Treat the
-    trailing turn as complete only if the payload's ``last_assistant_message``
-    (the final response text) is present in the assistant text read from disk.
-    """
-    if not last_assistant_message:
+    texts = [m['text'] for m in leading if m.get('text')]
+    tools = [t for m in leading for t in (m.get('tools') or [])]
+    if not texts and not tools:
         return False
-    tail = ' '.join(last_assistant_message.split())[-200:]
-    if not tail:
+    last = get_last_exchange(conn, session_id)
+    if last is None:
         return False
-    last_user = -1
-    for i, m in enumerate(messages):
-        if m['role'] == 'user':
-            last_user = i
-    on_disk = ' '.join(' '.join(m['text'] for m in messages[last_user + 1:]
-                                if m['role'] == 'assistant').split())
-    return tail in on_disk
+    assistant = last.get('assistant_text') or ''
+    if texts and '[...truncated...]' not in assistant:
+        add = redact_secrets('\n\n'.join(texts))
+        assistant = truncate_text((assistant + '\n\n' + add).strip() if assistant else add,
+                                  MAX_ASSISTANT_CHARS)
+    tool = last.get('tool_text') or ''
+    if tools and '[...truncated...]' not in tool:
+        add = redact_secrets('\n'.join(tools))
+        tool = truncate_text((tool + '\n' + add).strip() if tool else add, MAX_TOOL_CHARS)
+    update_exchange_text(conn, last['id'], assistant, tool or None, commit=False)
+    return True
 
 
 def index_transcript(conn, session_id: str, transcript_path: str,
                      project_path: str = '', project_hash: str = '',
-                     now: Optional[str] = None, final: bool = True,
-                     last_assistant_message: Optional[str] = None) -> List[Dict]:
+                     now: Optional[str] = None) -> List[Dict]:
     """Incrementally index a session's transcript into the DB (no commit).
 
     Shared by the UserPromptSubmit, Stop and SessionEnd hooks. Ensures the
-    session row exists, reads the transcript from the saved byte offset, pairs
-    new messages into exchanges, inserts them (+ FTS), advances the offset,
-    refreshes auto-tags over a rolling window, and runs auto-highlight
-    detection on the new exchanges. The caller commits.
+    session row exists, reads the transcript from the saved byte offset, and:
 
-    ``final`` says whether the trailing turn may be consumed (see
-    ``_trim_incomplete_tail``). When ``last_assistant_message`` is given (the
-    Stop hook), ``final`` is instead derived by checking that text reached the
-    transcript file. A read that stopped at the size cap is never final.
+      1. appends any LEADING assistant messages (blocks of a turn whose prompt
+         was stored on an earlier run) to the session's last exchange;
+      2. pairs the rest into exchanges and inserts them;
+      3. never consumes a TRAILING user message that has no reply yet (it
+         would otherwise be orphaned when the reply lands) — unless the read
+         stopped at the size cap right after it, in which case the prompt is
+         stored with an empty reply so progress is guaranteed and the reply
+         appends later.
 
-    Returns the list of newly inserted exchange dicts (may be empty).
+    Every run therefore makes forward progress and nothing is orphaned, no
+    matter how a turn is split across reads. Refreshes auto-tags over a
+    rolling window and runs auto-highlight detection on new exchanges. The
+    caller commits. Returns the newly inserted exchange dicts.
     """
     now = now or datetime.now(timezone.utc).isoformat()
     insert_session(conn, session_id=session_id, project_path=project_path,
@@ -528,13 +527,30 @@ def index_transcript(conn, session_id: str, transcript_path: str,
     if current_size > byte_offset:
         new_messages, new_offset = parse_transcript_from_offset(transcript_path, byte_offset)
         reached_eof = new_offset >= current_size
-        if last_assistant_message is not None:
-            final = _turn_is_flushed(new_messages, last_assistant_message)
-        usable, resume = _trim_incomplete_tail(new_messages, final and reached_eof)
-        if resume is not None:
-            new_offset = resume
-        if usable:
-            new_exchanges_list = build_new_exchanges(usable, existing_count + 1)
+
+        # 1) continuation of the previously stored exchange
+        k = 0
+        while k < len(new_messages) and new_messages[k]['role'] == 'assistant':
+            k += 1
+        leading, body = new_messages[:k], new_messages[k:]
+        if leading and existing_count > 0:
+            _append_continuation(conn, session_id, leading)
+
+        # 3) trailing prompt with no reply yet
+        allow_pending = False
+        if body and body[-1]['role'] == 'user':
+            resume = body[-1].get('_start')
+            if resume is not None and resume == byte_offset and not reached_eof:
+                allow_pending = True      # cap hit right after the prompt: store it pending
+            else:
+                body = body[:-1]
+                if resume is not None:
+                    new_offset = resume   # re-read the prompt next run
+
+        # 2) the completed turns
+        if body:
+            new_exchanges_list = build_new_exchanges(body, existing_count + 1,
+                                                     allow_pending=allow_pending)
             if new_exchanges_list:
                 insert_exchanges(conn, session_id, new_exchanges_list, commit=False)
         update_session_offset(conn, session_id, new_offset,
@@ -557,15 +573,10 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
     4. Index any new transcript data (``index_transcript``).
     5. Poll cross-session connections.
     6. Commit once.
-    7. Return user-facing ``systemMessage`` for ``/recall`` observability, or
-       ``additionalContext`` for anything Claude must act on.
-
-    Args:
-        input_data: Dict parsed from the hook's stdin JSON.
-        db_path: Override path for the database (used in tests).
-
-    Returns:
-        Dict to be printed as JSON to stdout.  ``{}`` for normal prompts.
+    7. Return a user-facing ``systemMessage`` for ``/recall`` observability
+       and/or ``additionalContext`` for everything Claude must act on (the
+       proactive suggestion and delivered highlights are combined, never one
+       dropped in favour of the other).
     """
     session_id = input_data.get('session_id', 'unknown')
     transcript_path = input_data.get('transcript_path', '')
@@ -573,47 +584,37 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
     # 'user_prompt'/'project_path'. Accept the new fields, fall back to legacy.
     user_prompt = input_data.get('prompt') or input_data.get('user_prompt', '')
     project_path = input_data.get('cwd') or input_data.get('project_path', '')
-    # project_hash is no longer supplied by the runtime — derive it from cwd
-    # (fall back to a payload-provided hash if one is ever present).
     project_hash = input_data.get('project_hash') or compute_project_hash(project_path)
 
     conn = get_connection(db_path)
 
     try:
-        # One-time v1 migration (no-op if legacy file absent or already checked)
         migrate_from_json(conn)
 
-        # At prompt-submit time no turn is in flight, so every turn on disk is
-        # complete: the trailing group may be consumed (final=True).
         index_transcript(conn, session_id, transcript_path,
-                         project_path=project_path, project_hash=project_hash,
-                         final=True)
+                         project_path=project_path, project_hash=project_hash)
 
         # Check connections for incoming highlights (updates written with commit=False)
         connection_msg = _check_connections(conn, session_id)
 
-        # Single commit covering all writes above
         conn.commit()
 
-        # Handle /recall (user-facing observability notice — systemMessage is right here)
+        pieces: List[str] = []
+        suggestion = _maybe_suggest_recall(conn, session_id, user_prompt)
+        if suggestion:
+            pieces.append(suggestion)
+        if connection_msg:
+            pieces.append(connection_msg)
+
+        out: Dict = {}
         if user_prompt.strip().lower().startswith('/recall'):
             updated = get_session(conn, session_id)
             exchange_count = updated['exchange_count'] or 0 if updated else 0
             log_recall_event(session_id, exchange_count)
-            return {
-                "systemMessage": f"[Observability] Context recall logged at exchange #{exchange_count}"
-            }
-
-        # Proactive recall suggestion (deterministic; gated on skill_enabled).
-        # Claude must ACT on this, so it goes into its context, not to the user.
-        suggestion = _maybe_suggest_recall(conn, session_id, user_prompt)
-        if suggestion:
-            return _hook_context(suggestion)
-
-        if connection_msg:
-            return _hook_context(connection_msg)
-
-        return {}
+            out["systemMessage"] = f"[Observability] Context recall logged at exchange #{exchange_count}"
+        if pieces:
+            out.update(_hook_context('\n\n'.join(pieces)))
+        return out
 
     finally:
         conn.close()
