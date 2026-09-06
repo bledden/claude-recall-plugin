@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""v2.3: the Stop hook captures each completed turn; SessionEnd captures the last.
+"""v2.3/v2.4: the Stop hook captures each completed turn; SessionEnd drains the rest.
 
 Before v2.3 capture ran only on the *next* UserPromptSubmit, so the final turn
-of every session was never indexed (6/6 ended sessions on a real store were
-missing it). The transcript file may lag the in-memory turn at Stop time, so
-the hook consumes the trailing turn only once the payload's
-``last_assistant_message`` has reached the file.
+of every session was never indexed. The transcript file may lag the in-memory
+turn at Stop time: whatever is on disk is stored now and later assistant blocks
+are appended to the same exchange, so nothing is orphaned and no
+``last_assistant_message`` guesswork is needed.
 """
 
 import json
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 from stop import run_hook as stop_hook
 from session_end import run_hook as end_hook
 from prompt_submit import run_hook as prompt_hook
-from db import get_connection, get_exchanges, get_session
+from db import get_connection, get_exchanges, get_session, search_exchanges_fts
 
 
 def _entry(role, text, ts):
@@ -53,43 +53,53 @@ class _Base(unittest.TestCase):
         finally:
             conn.close()
 
-    def _stop(self, last=''):
-        payload = {'session_id': self.sid, 'transcript_path': self.tp, 'cwd': '/tmp/p'}
-        if last is not None:
-            payload['last_assistant_message'] = last
+    def _stop(self, **extra):
+        payload = {'session_id': self.sid, 'transcript_path': self.tp, 'cwd': '/tmp/p', **extra}
         return stop_hook(payload, db_path=self.db_path)
 
 
 class TestStopHook(_Base):
     def test_indexes_the_completed_turn(self):
         _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'The answer is 42.', 't2'))
-        self.assertEqual(self._stop(last='The answer is 42.'), {})
+        self.assertEqual(self._stop(last_assistant_message='The answer is 42.'), {})
         ex = self._exchanges()
         self.assertEqual(len(ex), 1)
         self.assertEqual(ex[0]['assistant_text'], 'The answer is 42.')
 
-    def test_holds_back_while_transcript_lags(self):
-        """Only 'part one' is on disk; the final text is not -> nothing stored yet."""
+    def test_lagging_transcript_is_completed_by_appending(self):
+        """Only 'part one' is on disk at Stop time; the rest lands later."""
         _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'part one', 't2'))
-        self._stop(last='and the final answer is 42')
-        self.assertEqual(self._exchanges(), [])
-        conn = get_connection(self.db_path)
-        self.assertEqual(get_session(conn, self.sid)['byte_offset'], 0); conn.close()
-        # The file catches up; the same Stop payload now completes the turn.
+        self._stop()
+        self.assertEqual(self._exchanges()[0]['assistant_text'], 'part one')
         _append(self.tp, _entry('assistant', 'and the final answer is 42', 't3'))
-        self._stop(last='and the final answer is 42')
+        self._stop()
         ex = self._exchanges()
         self.assertEqual(len(ex), 1)
         self.assertIn('part one', ex[0]['assistant_text'])
         self.assertIn('final answer is 42', ex[0]['assistant_text'])
+        conn = get_connection(self.db_path)
+        try:   # the FTS entry followed the update
+            self.assertEqual(len(search_exchanges_fts(conn, 'final', session_id=self.sid)), 1)
+        finally:
+            conn.close()
 
-    def test_without_last_assistant_message_defers_to_next_prompt(self):
-        _append(self.tp, _entry('user', 'Q1', 't1'), _entry('assistant', 'A1', 't2'))
-        self._stop(last=None)                     # older Claude Code: field absent
-        self.assertEqual(self._exchanges(), [])   # cannot verify -> hold back
-        prompt_hook({'session_id': self.sid, 'transcript_path': self.tp,
-                     'prompt': 'next', 'cwd': '/tmp/p'}, db_path=self.db_path)
-        self.assertEqual(len(self._exchanges()), 1)
+    def test_prompt_without_reply_is_left_for_later(self):
+        _append(self.tp, _entry('user', 'Q1', 't1'))
+        self._stop()
+        self.assertEqual(self._exchanges(), [])
+        _append(self.tp, _entry('assistant', 'A1', 't2'))
+        self._stop()
+        self.assertEqual([(e['user_text'], e['assistant_text']) for e in self._exchanges()], [('Q1', 'A1')])
+
+    def test_blocked_stop_continuation_is_appended(self):
+        """Another Stop hook blocks; Claude continues with assistant-only records."""
+        _append(self.tp, _entry('user', 'Fix the bug', 't1'), _entry('assistant', 'First attempt complete.', 't2'))
+        self._stop(stop_hook_active=False)
+        _append(self.tp, _entry('assistant', 'Validation caught an error; here is the corrected answer.', 't3'))
+        self._stop(stop_hook_active=True)
+        ex = self._exchanges()
+        self.assertEqual(len(ex), 1)
+        self.assertIn('corrected answer', ex[0]['assistant_text'])
 
     def test_missing_transcript_is_a_noop(self):
         self.assertEqual(stop_hook({'session_id': self.sid}, db_path=self.db_path), {})
@@ -116,6 +126,14 @@ class TestSessionEndIndexesFinalTurn(_Base):
         _append(self.tp, _entry('user', 'Q2', 't3'), _entry('assistant', 'A2', 't4'))
         end_hook({'session_id': self.sid}, db_path=self.db_path)
         self.assertEqual(len(self._exchanges()), 2)
+
+    def test_drains_a_backlog_larger_than_one_pass(self):
+        prompt_hook({'session_id': self.sid, 'transcript_path': self.tp,
+                     'prompt': 'x', 'cwd': '/tmp/p'}, db_path=self.db_path)
+        _append(self.tp, *[e for i in range(600) for e in (_entry('user', f'Q{i}', f't{2*i}'),
+                                                          _entry('assistant', f'A{i}', f't{2*i+1}'))])
+        end_hook({'session_id': self.sid, 'transcript_path': self.tp}, db_path=self.db_path)
+        self.assertEqual(len(self._exchanges()), 600)
 
 
 if __name__ == '__main__':

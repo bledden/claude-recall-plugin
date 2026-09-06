@@ -15,6 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Recency half-life (days) used to re-rank search hits: a hit this old keeps
+# half its relevance weight. 0 disables recency weighting.
+DEFAULT_HALF_LIFE_DAYS = 30
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -27,7 +31,8 @@ DB_BUSY_TIMEOUT_MS = 5000
 # Bump this and add a branch in _apply_migrations() whenever the schema changes.
 #   v3: invocations table (usage counter)
 #   v4: FTS5 tokenizer switched to porter stemming (rebuilds exchanges_fts)
-SCHEMA_VERSION = 4
+#   v5: exchanges.tool_text (commands/files Claude touched) + FTS column (rebuild)
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Schema SQL
@@ -54,6 +59,7 @@ CREATE TABLE IF NOT EXISTS exchanges (
     preview         TEXT NOT NULL,
     user_text       TEXT,
     assistant_text  TEXT,
+    tool_text       TEXT,
     UNIQUE(session_id, idx)
 );
 
@@ -71,7 +77,7 @@ CREATE TABLE IF NOT EXISTS tags (
 -- All exchange inserts/deletes MUST go through insert_exchanges() / _delete_fts_rows().
 -- Direct modifications to the exchanges table will corrupt the FTS index.
 CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
-    user_text, assistant_text, preview,
+    user_text, assistant_text, preview, tool_text,
     content=exchanges, content_rowid=id,
     tokenize='porter unicode61'
 );
@@ -192,14 +198,17 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             "  command TEXT NOT NULL, args TEXT);"
             "CREATE INDEX IF NOT EXISTS idx_invocations_ts ON invocations(ts);"
         )
-    if current < 4:
-        # v4: porter stemming so 'kernel' matches 'kernels'. The FTS table is
-        # external-content, so drop + recreate with the new tokenizer and
-        # rebuild it from the exchanges table (fast: FTS5 'rebuild' command).
+    if current < 5:
+        # v4 (porter stemming) and v5 (tool_text column) both need the
+        # external-content FTS table dropped, recreated and rebuilt from the
+        # exchanges table; one rebuild covers both (fast: FTS5 'rebuild').
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(exchanges)").fetchall()]
+        if 'tool_text' not in cols:
+            conn.execute("ALTER TABLE exchanges ADD COLUMN tool_text TEXT")
         conn.executescript(
             "DROP TABLE IF EXISTS exchanges_fts;"
             "CREATE VIRTUAL TABLE exchanges_fts USING fts5("
-            "  user_text, assistant_text, preview,"
+            "  user_text, assistant_text, preview, tool_text,"
             "  content=exchanges, content_rowid=id, tokenize='porter unicode61');"
             "INSERT INTO exchanges_fts(exchanges_fts) VALUES('rebuild');"
         )
@@ -332,8 +341,8 @@ def insert_exchanges(conn: sqlite3.Connection, session_id: str,
     for ex in exchanges:
         cur = conn.execute(
             "INSERT OR IGNORE INTO exchanges "
-            "(session_id, idx, timestamp, preview, user_text, assistant_text) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(session_id, idx, timestamp, preview, user_text, assistant_text, tool_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 ex['idx'],
@@ -341,6 +350,7 @@ def insert_exchanges(conn: sqlite3.Connection, session_id: str,
                 ex['preview'],
                 ex.get('user_text'),
                 ex.get('assistant_text'),
+                ex.get('tool_text'),
             ),
         )
         if cur.rowcount > 0:
@@ -361,15 +371,15 @@ def _insert_fts_rows(conn: sqlite3.Connection, rowids: List[int]) -> None:
     """
     placeholders = ','.join('?' for _ in rowids)
     rows = conn.execute(
-        "SELECT id, user_text, assistant_text, preview FROM exchanges "
+        "SELECT id, user_text, assistant_text, preview, tool_text FROM exchanges "
         "WHERE id IN ({})".format(placeholders),
         rowids,
     ).fetchall()
     for row in rows:
         conn.execute(
-            "INSERT INTO exchanges_fts(rowid, user_text, assistant_text, preview) "
-            "VALUES(?, ?, ?, ?)",
-            (row['id'], row['user_text'], row['assistant_text'], row['preview']),
+            "INSERT INTO exchanges_fts(rowid, user_text, assistant_text, preview, tool_text) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (row['id'], row['user_text'], row['assistant_text'], row['preview'], row['tool_text']),
         )
 
 
@@ -380,16 +390,55 @@ def _delete_fts_rows(conn: sqlite3.Connection, session_id: str) -> None:
     since the delete command needs the original column values to match.
     """
     rows = conn.execute(
-        "SELECT id, user_text, assistant_text, preview FROM exchanges "
+        "SELECT id, user_text, assistant_text, preview, tool_text FROM exchanges "
         "WHERE session_id = ?",
         (session_id,),
     ).fetchall()
     for row in rows:
         conn.execute(
-            "INSERT INTO exchanges_fts(exchanges_fts, rowid, user_text, assistant_text, preview) "
-            "VALUES('delete', ?, ?, ?, ?)",
-            (row['id'], row['user_text'], row['assistant_text'], row['preview']),
+            "INSERT INTO exchanges_fts(exchanges_fts, rowid, user_text, assistant_text, preview, tool_text) "
+            "VALUES('delete', ?, ?, ?, ?, ?)",
+            (row['id'], row['user_text'], row['assistant_text'], row['preview'], row['tool_text']),
         )
+
+
+def get_last_exchange(conn: sqlite3.Connection, session_id: str) -> Optional[Dict]:
+    """The most recent exchange (highest idx) of a session, or None."""
+    row = conn.execute(
+        "SELECT * FROM exchanges WHERE session_id = ? ORDER BY idx DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_exchange_text(conn: sqlite3.Connection, exchange_id: int,
+                         assistant_text: Optional[str], tool_text: Optional[str],
+                         commit: bool = True) -> None:
+    """Replace an exchange's assistant/tool text and keep the FTS index in sync.
+
+    Used to append assistant blocks that arrive after the exchange was first
+    stored (a turn spanning several hook runs, a Stop-time transcript lag, or
+    a blocked-Stop continuation). External-content FTS needs the OLD values to
+    delete the stale entry before the new one is inserted.
+    """
+    old = conn.execute(
+        "SELECT id, user_text, assistant_text, preview, tool_text FROM exchanges WHERE id = ?",
+        (exchange_id,),
+    ).fetchone()
+    if old is None:
+        return
+    conn.execute(
+        "INSERT INTO exchanges_fts(exchanges_fts, rowid, user_text, assistant_text, preview, tool_text) "
+        "VALUES('delete', ?, ?, ?, ?, ?)",
+        (old['id'], old['user_text'], old['assistant_text'], old['preview'], old['tool_text']),
+    )
+    conn.execute(
+        "UPDATE exchanges SET assistant_text = ?, tool_text = ? WHERE id = ?",
+        (assistant_text, tool_text, exchange_id),
+    )
+    _insert_fts_rows(conn, [exchange_id])
+    if commit:
+        conn.commit()
 
 
 def get_exchange_count(conn: sqlite3.Connection, session_id: str) -> int:
@@ -464,11 +513,52 @@ def _build_fts_query(query: str) -> Optional[str]:
     return ' AND '.join(quoted)
 
 
+# The FTS5 snippet() call used by every search: column -1 = whichever column
+# matched best; 24 tokens of context around the match, marked with « ».
+_SNIPPET_SQL = "snippet(exchanges_fts, -1, '«', '»', '…', 24) AS snippet"
+
+
+def _rerank(rows: List[Dict], limit: int, half_life_days: float) -> List[Dict]:
+    """Relevance (BM25) re-weighted by recency, funes-style.
+
+    ``rel`` is the positive BM25 relevance; ``rec`` decays with a half-life so
+    a hit ``half_life_days`` old keeps half its weight. Recency can at most
+    halve a hit's score, so a clearly better match still wins over a merely
+    newer one. Ties (equal relevance) fall back to newest-first.
+    """
+    now = datetime.now(timezone.utc)
+
+    def score(r):
+        rel = -float(r.get('_bm25') or 0.0)
+        rec = 1.0
+        if half_life_days and half_life_days > 0:
+            try:
+                ts = datetime.fromisoformat((r.get('timestamp') or '').replace('Z', '+00:00'))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+                rec = 0.5 ** (age_days / half_life_days)
+            except (ValueError, TypeError):
+                rec = 0.0
+        return rel * (0.5 + 0.5 * rec)
+
+    rows.sort(key=lambda r: (score(r), r.get('timestamp') or '', r.get('idx') or 0), reverse=True)
+    for r in rows:
+        r.pop('_bm25', None)
+    return rows[:limit]
+
+
 def search_exchanges_fts(conn: sqlite3.Connection, query: str,
                          session_id: Optional[str] = None,
                          project_hash: Optional[str] = None,
-                         limit: int = 10) -> List[Dict]:
-    """Full-text search over exchanges via FTS5.
+                         limit: int = 10,
+                         half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> List[Dict]:
+    """Full-text search over exchanges via FTS5, ranked by relevance × recency.
+
+    Pulls a candidate pool ordered by BM25 (across user text, assistant text,
+    preview and tool calls), attaches a ``snippet`` of the best-matching
+    passage, then re-ranks by recency (see ``_rerank``). Pass
+    ``half_life_days=0`` for pure relevance.
 
     Args:
         conn: SQLite connection.
@@ -476,20 +566,22 @@ def search_exchanges_fts(conn: sqlite3.Connection, query: str,
         session_id: Optional — restrict to one session.
         project_hash: Optional — restrict to sessions with this project hash.
         limit: Max results.
+        half_life_days: recency half-life in days (0 disables).
 
     Returns:
-        List of exchange dicts matching the query.
+        List of exchange dicts (plus ``snippet``) best-first.
     """
     safe_query = _build_fts_query(query)
     if safe_query is None:
         return []
 
     sql = (
-        "SELECT e.* FROM exchanges e "
+        "SELECT e.*, bm25(exchanges_fts) AS _bm25, " + _SNIPPET_SQL + " "
+        "FROM exchanges e "
         "JOIN exchanges_fts fts ON e.id = fts.rowid "
     )
     wheres = ["exchanges_fts MATCH ?"]
-    params = [safe_query]
+    params: List[Any] = [safe_query]
 
     if session_id is not None:
         wheres.append("e.session_id = ?")
@@ -502,39 +594,37 @@ def search_exchanges_fts(conn: sqlite3.Connection, query: str,
         params.append(project_hash)
 
     sql += " WHERE " + " AND ".join(wheres)
-    # Most recent matches first — without an ORDER BY, FTS5 returns rowid
-    # order, i.e. the OLDEST matches, which is the opposite of what a memory
-    # tool should surface under a LIMIT.
-    sql += " ORDER BY e.timestamp DESC, e.idx DESC"
-    sql += " LIMIT ?"
-    params.append(limit)
+    sql += " ORDER BY bm25(exchanges_fts), e.timestamp DESC LIMIT ?"
+    params.append(max(limit * 5, 50))
 
-    cur = conn.execute(sql, params)
-    return [dict(r) for r in cur.fetchall()]
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    return _rerank(rows, limit, half_life_days)
 
 
 def search_exchanges_global(conn: sqlite3.Connection, query: str,
-                            limit: int = 20) -> List[Dict]:
-    """Search across ALL sessions/projects, enriching results with session info.
+                            limit: int = 20,
+                            half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> List[Dict]:
+    """Search across ALL sessions/projects, ranked by relevance × recency.
 
     Returns:
-        List of dicts — exchange fields plus project_path and session_started.
+        List of dicts — exchange fields plus ``snippet``, project_path and
+        session_started.
     """
     safe_query = _build_fts_query(query)
     if safe_query is None:
         return []
 
     sql = (
-        "SELECT e.*, s.project_path, s.started_at AS session_started "
+        "SELECT e.*, s.project_path, s.started_at AS session_started, "
+        "bm25(exchanges_fts) AS _bm25, " + _SNIPPET_SQL + " "
         "FROM exchanges e "
         "JOIN exchanges_fts fts ON e.id = fts.rowid "
         "JOIN sessions s ON e.session_id = s.session_id "
         "WHERE exchanges_fts MATCH ? "
-        "ORDER BY e.timestamp DESC "
-        "LIMIT ?"
+        "ORDER BY bm25(exchanges_fts), e.timestamp DESC LIMIT ?"
     )
-    cur = conn.execute(sql, (safe_query, limit))
-    return [dict(r) for r in cur.fetchall()]
+    rows = [dict(r) for r in conn.execute(sql, (safe_query, max(limit * 5, 50))).fetchall()]
+    return _rerank(rows, limit, half_life_days)
 
 # ---------------------------------------------------------------------------
 # Maintenance

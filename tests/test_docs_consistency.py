@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Docs-consistency tests for the recall plugin (DOCS audit cluster).
 
-Pure documentation tests: they read README.md, commands/recall.md, and
+Pure documentation tests: they read README.md, skills/recall/SKILL.md, and
 skills/recall-assistant/SKILL.md and assert cross-file consistency. They touch
 NO database and import NO scripts — safe to run in isolation.
 
@@ -25,7 +25,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 _README = _ROOT / 'README.md'
-_RECALL_MD = _ROOT / 'commands' / 'recall.md'
+_RECALL_MD = _ROOT / 'skills' / 'recall' / 'SKILL.md'
 _SKILL_MD = _ROOT / 'skills' / 'recall-assistant' / 'SKILL.md'
 
 

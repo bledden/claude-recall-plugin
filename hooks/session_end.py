@@ -8,6 +8,7 @@ recording the current UTC timestamp in the ended_at column.
 
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
@@ -16,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent))            # hooks/  (prompt_subm
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 from db import get_connection, get_session, end_session, DB_PATH
 from prompt_submit import index_transcript
+
+# Stay inside the hook's 10s timeout with margin.
+DRAIN_BUDGET_SECONDS = 7.0
 
 
 # ---------------------------------------------------------------------------
@@ -44,15 +48,22 @@ def run_hook(input_data: Dict, db_path: Path = None) -> Dict:
         if session is None:
             return {}
 
-        # Final catch-up: the session is over, so every turn on disk is
-        # complete and may be consumed (final=True).
+        # Final catch-up: drain the whole backlog in bounded, committed passes
+        # (each pass reads at most 2 MB / 1000 messages) until no progress or
+        # the time budget is spent — one capped pass could leave the last
+        # turns unread on a long session.
         transcript_path = input_data.get('transcript_path') or session.get('transcript_path') or ''
         if transcript_path:
-            index_transcript(conn, session_id, transcript_path,
-                             project_path=session.get('project_path') or input_data.get('cwd', ''),
-                             project_hash=session.get('project_hash') or '',
-                             final=True)
-            conn.commit()
+            deadline = time.monotonic() + DRAIN_BUDGET_SECONDS
+            while True:
+                before = (get_session(conn, session_id) or {}).get('byte_offset', 0)
+                index_transcript(conn, session_id, transcript_path,
+                                 project_path=session.get('project_path') or input_data.get('cwd', ''),
+                                 project_hash=session.get('project_hash') or '')
+                conn.commit()
+                after = (get_session(conn, session_id) or {}).get('byte_offset', 0)
+                if after <= before or time.monotonic() > deadline:
+                    break
 
         ended_at = datetime.now(timezone.utc).isoformat()
         end_session(conn, session_id, ended_at)

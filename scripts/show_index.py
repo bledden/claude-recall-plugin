@@ -226,6 +226,8 @@ def format_search_results(results: List[Dict], keyword: str) -> str:
         time = format_timestamp(ex.get('timestamp', ''))
         preview = ex.get('preview', '(no preview)')
         lines.append(f"**#{idx}** [{time}] \"{preview}\"")
+        if ex.get('snippet'):
+            lines.append(f"    ↳ {' '.join(str(ex['snippet']).split())}")
 
     if len(results) > 20:
         lines.append(f"*... and {len(results) - 20} more matches*")

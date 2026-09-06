@@ -1,7 +1,7 @@
 {
   "name": "recall",
-  "version": "2.3.1",
-  "description": "Cross-session, cross-project conversation recall with SQLite storage, auto-tagging, compaction recovery, highlight sharing, and proactive recall assistant skill",
+  "version": "2.4.0",
+  "description": "Cross-session, cross-project conversation recall: verbatim exchanges and the commands Claude ran, ranked search with match snippets, secrets redacted at index time, compaction recovery, highlight sharing, and a skill Claude invokes on its own",
   "author": {
     "name": "bledden",
     "url": "https://github.com/bledden"
